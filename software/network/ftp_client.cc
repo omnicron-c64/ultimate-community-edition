@@ -260,6 +260,42 @@ int FTPClient::list(const char *path, char *buf, int size, int *bytes) {
     ListingBuffer b = {buf, size, 0}; if (size <= 0) return fail("invalid listing buffer"); buf[0] = 0;
     int result = list_lines(path, collect_listing, &b); *bytes = b.used; return result;
 }
+int FTPClient::size(const char *path, uint32_t *bytes) {
+    report("File size");
+    int code = send_cmd("SIZE", path);
+    if (code == 500 || code == 502 || code == 504) return 1; // legacy cache fallback
+    if (code != 213) return fail("file size unavailable");
+    const char *p = response + 4;
+    if (*p < '0' || *p > '9') return fail("invalid file size");
+    uint32_t value = 0;
+    while (*p >= '0' && *p <= '9') {
+        unsigned digit = *p++ - '0';
+        if (value > (UINT32_MAX - digit) / 10) return fail("file exceeds 32-bit size limit");
+        value = value * 10 + digit;
+    }
+    if (strcmp(p, "\r\n") && strcmp(p, "\n")) return fail("invalid file size");
+    *bytes = value;
+    return 0;
+}
+int FTPClient::read_begin(const char *path) {
+    int fd = open_data_connection();
+    if (fd < 0) return -1;
+    report("Downloading");
+    int code = send_cmd("RETR", path);
+    if (code != 125 && code != 150) { lwip_close(fd); return fail("download rejected"); }
+    return fd;
+}
+int FTPClient::read_data(int fd, void *buffer, uint32_t length) {
+    // Bound socket calls even when a loader requests an entire REU image.
+    if (length > 32768) length = 32768;
+    int n = recv(fd, buffer, length, 0);
+    if (n < 0) return fail("download receive failed / timed out");
+    if (n > 0) report("Downloading", transferred + n);
+    return n;
+}
+int FTPClient::read_end(int fd, bool complete) {
+    return finish_transfer(fd, complete);
+}
 int FTPClient::retr(const char *path, File *file, int *bytes) {
     *bytes = 0; int fd = open_data_connection(); if (fd < 0) return -1;
     report("Downloading"); int code = send_cmd("RETR", path);

@@ -1,5 +1,19 @@
 # Validation status
 
+## UCE 1.0.1 build and initial hardware result
+
+- Maintainer build on jiffyplex: exit status 0, firmware identifier `3.15a-UCE.2`.
+- Updater section start `0x03000234`, length `0x005569f8`.
+- Uploaded updater SHA-256: `9802cb7f1710b9ad0595cd4269779ef8f3454fadc130f6d7ac78b2e55752a04e`.
+- Maintainer reports "It seems to be working" after testing. This is initial operation feedback, not confirmation of every acceptance case or byte-for-byte REU/USB verification.
+- Original non-Elite regression coverage for this change has not been separately reported.
+
+## UCE 1.0.1 FTP streaming host checks
+
+The actual FTP client and read-stream class are exercised over loopback under address/undefined-behavior sanitizers. Coverage includes 16 MiB and 32 MiB payload verification, forward/backward seeks, unsupported/overflowing SIZE responses, truncation, growth and failed final completion, alongside the existing FTP regressions. These are host tests, not a Nios-II target build or board test.
+
+Follow-up board checks: load a known 16 MiB REU image over FTP, copy it to USB and verify its SHA-256 on a PC. Repeat an FTP-to-USB move using a disposable source, check that failed copies preserve the source, and test View/Hex View/seek plus existing small-file uploads. Confirm the server permits the extra per-file connection. Retain the 1.0.0 release for rollback.
+
 ## UCE 1.0.0 source candidate
 
 - Scope: the initial UCE functionality described in README.md and USER_GUIDE.md.

@@ -28,6 +28,11 @@ FRESULT FileSystemFTP::file_open(const char *filename, uint8_t flags, File **fil
     if (connect_if_needed() < 0) return FR_NOT_READY;
     mstring remote;
     build_ftp_path(filename, remote);
+    if (!(flags & (FA_WRITE | FA_CREATE_ANY))) {
+        FRESULT streamed = open_read_stream(remote.c_str(), file);
+        if (streamed != FR_OK || *file) return streamed;
+        // Servers without SIZE retain the existing seekable cache behavior.
+    }
     FileManager *fm = FileManager::getFileManager();
     File *temp = NULL; mstring canonical;
     // A unique fresh temporary file per open: never reuse an incomplete or stale

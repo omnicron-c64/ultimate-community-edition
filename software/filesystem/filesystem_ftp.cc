@@ -78,6 +78,7 @@ void FileSystemFTP::drop_connection()
     connected = false;
 }
 
+#include "ftp_read_stream.h"
 #include "ftp_file_transfer.h"
 
 FRESULT FileSystemFTP::dir_open(const char *path, Directory **dir)

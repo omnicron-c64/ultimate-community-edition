@@ -33,6 +33,11 @@ public:
     int list(const char *path, char *buf, int bufsize, int *bytes_read);
     // Streaming list parser: no fixed-size whole-directory buffer.
     int list_lines(const char *path, bool (*line)(void *, const char *, bool), void *context);
+    // Incremental RETR. The caller owns fd until read_end (or disconnect).
+    int size(const char *path, uint32_t *bytes);
+    int read_begin(const char *path);
+    int read_data(int fd, void *buffer, uint32_t length);
+    int read_end(int fd, bool complete);
     int retr(const char *remote_path, File *file, int *bytes_read);
     int stor(const char *remote_path, File *file);
     int dele(const char *path);

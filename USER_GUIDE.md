@@ -1,6 +1,6 @@
 # Using Ultimate Community Edition
 
-UCE 1.0.0 is designed for the original Ultimate 64 and Ultimate 64 Elite. Firmware identifier: `3.15a-UCE.1`.
+UCE 1.0.1 is designed for the original Ultimate 64 and Ultimate 64 Elite. Firmware identifier: `3.15a-UCE.2`.
 
 ## Menu and machine controls
 
@@ -37,7 +37,7 @@ Create or edit a profile under `/ftp` with server name, host, port, user, passwo
 
 Test connection checks login and directory data access. Reconnect establishes a fresh session. Disconnect closes the session; later operations may connect again. Status shows the current/last operation and transfer count. Refresh requests a directory reload; re-enter the server when necessary.
 
-Browsing supports passive EPSV/PASV and MLSD with common LIST fallback. Listings are bounded to 4,096 entries. Opened remote files are downloaded into fresh local temporary storage, which must have enough writable space. Copies/uploads report transfer stages and errors.
+Browsing supports passive EPSV/PASV and MLSD with common LIST fallback. Listings are bounded to 4,096 entries. In UCE 1.0.1, read-only files stream directly when the server supports SIZE: full 16 MiB REU images and larger copies to USB do not need to fit in `/Temp`. Each source uses a private FTP connection. Backward seeks restart and replay the download, so remote disk-image browsing can be slower than local storage. Writable opens/uploads and servers that explicitly reject SIZE still use temporary storage; the approximately 16 MiB RAM disk limit applies to those paths, including large FTP-to-FTP copies. Copies/uploads report transfer stages and errors.
 
 Plain FTP only: no FTPS or SFTP. Active socket operations cannot currently be cancelled interactively. Uploads are not atomic replacement and a failed upload may leave a partial remote file. Use test files when evaluating transfers.
 

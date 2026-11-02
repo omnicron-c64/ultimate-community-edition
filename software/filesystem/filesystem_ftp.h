@@ -110,6 +110,7 @@ public:
 
     FTPClient *get_client() { if (!client) client = new FTPClient(); return client; }
     int connect_if_needed();
+    FRESULT open_read_stream(const char *remote, File **file);
     void drop_connection();
 
     bool is_writable() { return true; }

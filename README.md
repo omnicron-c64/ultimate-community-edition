@@ -2,7 +2,7 @@
 
 Community firmware for the **original Ultimate 64 and original Ultimate 64 Elite**, based on Ultimate firmware **v3.15a**.
 
-**UCE 1.0.0 — initial release source candidate.** Firmware identifier: `3.15a-UCE.1`. UCE is an independent community project, not an official Gideon or SpiffyCrew release. It retains the upstream hardware identification and update format.
+**UCE 1.0.1.** Firmware identifier: `3.15a-UCE.2`. UCE is an independent community project, not an official Gideon or SpiffyCrew release. It retains the upstream hardware identification and update format.
 
 ## Supported hardware and status
 
@@ -15,21 +15,21 @@ Community firmware for the **original Ultimate 64 and original Ultimate 64 Elite
 
 The inherited repository contains other build targets. Their presence does not mean UCE supports them. Build **`make u64`**, not the default all-products target.
 
-This initial UCE source package has passed focused native checks. Its complete target build and board acceptance are pending. See [VALIDATION.md](VALIDATION.md) for current status.
+This release passed focused native checks and was compiled successfully with the supported toolchain on jiffyplex. The maintainer reports initial operation on the original Elite; broader regression testing remains ongoing. See [VALIDATION.md](VALIDATION.md) for current status.
 
 ## Features
 
 - **Assembly64-compatible search:** choose public or local servers, edit server definitions and API paths, browse search results and copy files to local storage. Responses support up to 64 KiB and 6,000 JSON tokens within explicit limits.
 - **Wi-Fi management:** connection progress and feedback, status/reconnect tools, scan/select an access point and manage saved access points.
 - **Network information:** DHCP/static addressing, gateway, netmask and active DNS resolver addresses.
-- **FTP file access:** server profiles, connection tests, reconnect/disconnect, passive directory browsing, uploads/downloads and transfer status.
+- **FTP file access:** server profiles, connection tests, reconnect/disconnect, passive directory browsing, uploads/downloads and transfer status. Read-only streaming on SIZE-capable servers removes the RAM-disk staging limit for REU loads and FTP-to-local copies; writable opens and legacy servers still use temporary storage.
 - **File management:** explicit copy/move destination selection and menu navigation with keyboard shortcuts.
 - **Interface:** configurable colours and optional branding, readable multiline dialogs and an acknowledgement viewer.
 - **Machine control:** C=+F power-off from the file browser using the board's existing power control; C=+O opens the machine-code monitor.
-+
-+UCE also retains upstream capabilities including disk/cartridge emulation, the HTTP API and FPGA streaming. See [USER_GUIDE.md](USER_GUIDE.md) for everyday operation and [CHANGELOG.md](CHANGELOG.md) for the initial release summary. Credits are in [CREDITS.md](CREDITS.md).
-+
-+## Get the source
+
+UCE also retains upstream capabilities including disk/cartridge emulation, the HTTP API and FPGA streaming. See [USER_GUIDE.md](USER_GUIDE.md) for everyday operation and [CHANGELOG.md](CHANGELOG.md) for the initial release summary. Credits are in [CREDITS.md](CREDITS.md).
+
+## Get the source
 
 Clone this repository with submodules after it has been published:
 
@@ -98,7 +98,7 @@ The result is **`update.u64`** in the repository root. ESP32 bridge identity rem
 
 1. Preserve your working updater and important configuration files.
 2. Copy the newly built `update.u64` to USB and open it using the original U64's normal firmware update workflow.
-3. Confirm the updater identifies the intended board, complete the update, then verify `3.15a-UCE.1` and the Wi-Fi bridge version in the running system.
+3. Confirm the updater identifies the intended board, complete the update, then verify `3.15a-UCE.2` and the Wi-Fi bridge version in the running system.
 4. Check normal boot, menus/settings, Wi-Fi reconnection, DNS status, Assembly64 search/copy/reopen, FTP downloads/uploads and acknowledgement-screen return. See [VALIDATION.md](VALIDATION.md).
 
 This `.u64` updater installs into flash. It is distinct from the RAM-only `.cfw` overlay experiment. Flash recovery procedures depend on board revision and failure mode; retain access to the upstream recovery information and your known-working build.

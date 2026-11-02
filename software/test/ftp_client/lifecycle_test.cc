@@ -46,6 +46,7 @@ class FileSystemFTP:public FileSystem {
 public:FTPClient backend;FTPClient *client=&backend;bool offline=false;
  FTPClient*get_client(){return client;}int connect_if_needed(){return offline?-1:0;}
  void build_ftp_path(const char*,mstring&out){out=mstring("/file.d64");}
+ FRESULT open_read_stream(const char*,File**){return FR_OK;} // SIZE unsupported: legacy-cache coverage
  FRESULT file_open(const char*,uint8_t,File**);
 };
 class FileOnFTP:public File {
