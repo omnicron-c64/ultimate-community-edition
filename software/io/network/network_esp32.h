@@ -25,6 +25,8 @@
 #define CFG_WIFI_DIS     0xBA
 #define CFG_WIFI_FORGET  0xBB
 #define CFG_WIFI_STATUS  0xBC
+#define CFG_WIFI_PANEL   0xBD
+#define CFG_WIFI_SAVED   0xBE
 
 class NetworkLWIP_WiFi : public NetworkInterface
 {
@@ -36,6 +38,15 @@ public:
 
     const char *identify() { return "WiFi"; }
     bool is_wireless() { return true; }
+    bool hasUsableAddress();
+#if U64 == 1
+    static SubsysResultCode_e status_screen(SubsysCommand *cmd);
+    static void cfg_status_screen(UserInterface *, ConfigItem *);
+    static void cfg_saved_aps(UserInterface *, ConfigItem *);
+    static void saved_aps(UserInterface *);
+    static void reconnect(UserInterface *);
+    void show_details(UserInterface *);
+#endif
     void attach_config();
 
     // User Interface

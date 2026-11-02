@@ -10,6 +10,7 @@
 #include "menu.h"
 #include "action.h"
 #include "network_interface.h"
+#include "assembly_server.h"
 
 class BrowsableQueryResults;
 
@@ -44,6 +45,11 @@ public:
     void into(void);
     bool into2(void) { into(); return true; }
 //    void level_up(void) { printf("Results Up\n"); };
+
+    //virtual void draw_item(Browsable *t, int line, bool selected);
+    void show_status();
+    virtual void move_to_index(int idx);
+    virtual void draw();
 };
 
 class AssemblySearch: public TreeBrowser
@@ -62,22 +68,14 @@ public:
 class BrowsableAssemblyRoot: public Browsable
 {
     JSON *presets;
+    SearchService* server_data;
 
-    static SubsysResultCode_e new_search(SubsysCommand *cmd)
-    {
-        printf("Creating search menu...\n");
-            
-        Browsable *root = (Browsable *)cmd->functionID;
-        AssemblySearch *searchBrowser = new AssemblySearch(cmd->user_interface, root);
-        searchBrowser->init(cmd->user_interface->screen, cmd->user_interface->keyboard);
-        cmd->user_interface->activate_uiobject(searchBrowser);
-        // from this moment on, we loose focus.. polls will go directly to config menu!
-        return SSRET_OK;
-    }
+    static SubsysResultCode_e new_search(SubsysCommand *cmd);
 public:
-    BrowsableAssemblyRoot()
+    BrowsableAssemblyRoot(SearchService* _server_data)
     {
         presets = NULL;
+        server_data = _server_data;
     }
 
     ~BrowsableAssemblyRoot()
@@ -90,33 +88,7 @@ public:
         return (presets != NULL);
     }
 
-    IndexedList<Browsable *> *getSubItems(int &error)
-    {
-        // name, group, handle, event, date*, category*, subcat*, rating*, type*, repo*, latest, sort, order
-        if (children.get_elements() == 0) {
-            children.append(new BrowsableStatic("\em  Assembly 64 Query Form"));
-            children.append(new BrowsableStatic(""));
-            children.append(new BrowsableQueryField("name", NULL));
-            children.append(new BrowsableQueryField("group", NULL));
-            children.append(new BrowsableQueryField("handle", NULL));
-            children.append(new BrowsableQueryField("event", NULL));
-            if (presets && (presets->type() == eList)) {
-                JSON_List *list = (JSON_List *)presets;
-                for (int i = 0; i < list->get_num_elements(); i++) {
-                    JSON_Object *obj = (JSON_Object *)(*list)[i];
-                    JSON *type = obj->get("type");
-                    JSON *values = obj->get("values");
-                    if (type && type->type() == eString && values && values->type() == eList) {
-                        children.append(new BrowsableQueryField(((JSON_String *)type)->get_string(), (JSON_List *)values));
-                    }
-                }
-            }
-            children.append(new BrowsableStatic(""));
-            children.append(new BrowsableStatic(""));
-            children.append(new BrowsableQueryField("$", NULL));
-        }
-        return &children;
-    }
+    IndexedList<Browsable *> *getSubItems(int &error);
 
     void getDisplayString(char *buffer, int width, UserInterface *ui) {
         sprintf(buffer, "A64     Assembly 64 Database");
@@ -128,64 +100,33 @@ public:
 
     const char *getName()
     {
-        return "Assembly 64 Search";
+        return (server_data) ? server_data->title.c_str() : "?";
     }
 };
 
 class BrowsableQueryResult: public Browsable
 {
     mstring summary;
+    mstring summary2;
     //mstring name;
     //mstring group;
     //mstring year;
     mstring id;
+    mstring updated;
     int category;
+    int year;
     Path path;
 public:
-    BrowsableQueryResult(JSON_Object *result) : path("/a64")
-    {
-        JSON *j;
-        int year = 0;
-
-        j = result->get("name");
-        if (j && j->type() == eString) {
-            summary = ((JSON_String *)j)->get_string();
-        }
-        j = result->get("year");
-        if (j && j->type() == eInteger) {
-            year = ((JSON_Integer *)j)->get_value();
-        }
-        j = result->get("group");
-        if (j && j->type() == eString) {
-            summary += " (";
-            summary += ((JSON_String *)j)->get_string();
-            if (year) {
-                summary += ", ";
-                summary += year;
-            }
-            summary += ")";
-        }
-        category = 0;
-        j = result->get("category");
-        if (j && j->type() == eInteger) {
-            category = ((JSON_Integer *)j)->get_value();
-        }
-        j = result->get("id");
-        if (j && j->type() == eString) {
-            id = ((JSON_String *)j)->get_string();
-        }
-        path.cd(id.c_str());
-        char catstr[8];
-        sprintf(catstr, "%d", category);
-        path.cd(catstr);
-    }
+    BrowsableQueryResult(JSON_Object *result, int window_width);
 
     ~BrowsableQueryResult()
     {
     }
 
     const char *getId() { return id.c_str(); }
+    const char *getUpdated() { return updated.c_str(); }
     int getCategory() { return category; }
+    int getYear() { return year; }
 
     const char *getName()
     {
@@ -197,13 +138,7 @@ public:
         return &path;
     }
 
-    void getDisplayString(char *buffer, int width, UserInterface *ui)
-    {
-        memset(buffer, ' ', width+2);
-        buffer[width+2] = '\0';
-
-        strncpy(buffer, summary.c_str(), width);
-    }
+    void getDisplayString(char *buffer, int width, UserInterface *ui);
 
     IndexedList<Browsable *> *getSubItems(int &error);
 
@@ -213,13 +148,13 @@ class BrowsableQueryResults : public Browsable // Root of results screen
 {
     IndexedList<Browsable *>items; // Override from Browsable
 public:
-    BrowsableQueryResults(JSON_List *results) : items(16, NULL)
+    BrowsableQueryResults(JSON_List *results, int window_width) : items(16, NULL)
     {
         for(int i=0; i<results->get_num_elements(); i++) {
             JSON *j = (*results)[i];
             if (j && j->type() == eObject) {
                 JSON_Object *obj = (JSON_Object *)j;
-                items.append(new BrowsableQueryResult(obj));
+                items.append(new BrowsableQueryResult(obj, window_width));
             }
         }
     }
@@ -245,50 +180,87 @@ class AssemblyInGui : public ObjectWithMenu
 {
     TaskCategory *taskItemCategory;
     BrowsableAssemblyRoot * root;
+    int dbselection;
+    static const char** ServerNameList;
+    static SearchService** ServerList;
+    static int server_count;
 
     static SubsysResultCode_e S_OpenSearch(SubsysCommand *cmd) {
         UserInterface *cmd_ui = cmd->user_interface;
         S_OpenSearch(cmd_ui);
         return SSRET_OK;
     }
+
+    static SubsysResultCode_e S_EditServers(SubsysCommand *cmd);
+    static int load_custom();
+    static int get_servers();
    
 public:
-    AssemblyInGui() {
-        root = NULL;
-        taskItemCategory = TasksCollection :: getCategory("Assembly 64", SORT_ORDER_ASSEMBLY);
-    }
+    AssemblySearch *active_search;
+    AssemblyInGui();
 
     ~AssemblyInGui() {
         // unregister taskItemCategory
     }
 
     static void S_OpenSearch(UserInterface *cmd_ui) {
+        if (!cmd_ui) return;
+        if (assembly_gui.active_search) {
+            cmd_ui->popup("A search is already open.\nClose it before starting another.", BUTTON_OK);
+            return;
+        }
 
         if (!NetworkInterface :: DoWeHaveLink()) {
             if (cmd_ui)
                 cmd_ui->popup("No Valid Network Link", BUTTON_OK);
             return;
         }
+
         Screen *scr = cmd_ui->screen;
+
+
+        int selection = 0;
+        if (cmd_ui) {
+            int count = get_servers();
+            if (count < 1)
+                return;
+            if (count > 1)
+                selection = cmd_ui->choice("Internet File Search", ServerNameList, count);
+            if (selection < 0)
+                return;
+        }
+
         scr->set_status("Connecting...", cmd_ui->color_status);
 
-        BrowsableAssemblyRoot *root = assembly_gui.getRoot();
-        if (!root->isInitialized()) {
+        BrowsableAssemblyRoot *root = assembly_gui.getRoot(selection);
+        if ((!root)||(!root->isInitialized())) {
             if (cmd_ui)
                 cmd_ui->popup("Could not connect.", BUTTON_OK);
             return;
         }
 
-        AssemblySearch *search_window = new AssemblySearch(cmd_ui, assembly_gui.getRoot());
-        search_window->init(cmd_ui->screen, cmd_ui->keyboard);
+        AssemblySearch *search_window = new AssemblySearch(cmd_ui, assembly_gui.getRoot(selection));
         search_window->setCleanup();
-        cmd_ui->activate_uiobject(search_window); // now we have focus
+        // Claim focus before drawing, and delete rejected windows immediately.
+        if (cmd_ui->activate_uiobject(search_window) < 0) {
+            delete search_window;
+            cmd_ui->popup("Cannot open search window.\nClose other windows and retry.", BUTTON_OK);
+            return;
+        }
+        assembly_gui.active_search = search_window;
+        search_window->init(cmd_ui->screen, cmd_ui->keyboard);
     }
 
-    BrowsableAssemblyRoot *getRoot()
+    BrowsableAssemblyRoot *getRoot(int selection)
     {
+        if (dbselection != selection) {
+            dbselection = selection;
+            delete root;
+            root = NULL;
+        }
+
         if (!root) {
-            root = new BrowsableAssemblyRoot();
+            root = new BrowsableAssemblyRoot(ServerList[selection]);
         }
         if (!root->isInitialized()) {
             root->fetchPresets();
@@ -298,6 +270,9 @@ public:
 
     void create_task_items(void) {
         taskItemCategory->append(new Action("New Search", S_OpenSearch, 0, 0));
+#if U64 == 1 && !defined(RECOVERYAPP)
+        taskItemCategory->append(new Action("Edit search servers", S_EditServers, 0, 0));
+#endif
     }
 };
 

@@ -11,7 +11,8 @@ extern "C" {
 typedef struct {
     int offset;
     int size;
-    uint8_t buffer[16384];
+    bool overflow;
+    uint8_t buffer[65536];
 } t_BufferedBody;
 
 // Callbacks
@@ -54,8 +55,8 @@ public:
         if (!body) {
             return NULL;
         }
-        if (body->size > 16383) {
-            body->size = 16383;
+        if (body->size >= (int)sizeof(body->buffer)) {
+            body->size = sizeof(body->buffer)-1;
         }
         body->buffer[body->size] = 0;
         return (char *)body->buffer;

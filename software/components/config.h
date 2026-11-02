@@ -288,6 +288,7 @@ class ConfigManager
     ConfigManager();
     ~ConfigManager();
 public:
+    bool get_safe_mode() const { return safeMode; }
 	static ConfigManager* getConfigManager() {
 		static ConfigManager config_manager;
 		return &config_manager;

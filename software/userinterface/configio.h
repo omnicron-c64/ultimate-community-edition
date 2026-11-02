@@ -41,6 +41,7 @@ class ConfigIO : public ObjectWithMenu
         Action *clr_flash;
         Action *clear_dbg;
         Action *save_dbg;
+        Action *heap_info;
     } myActions;
 public:
     ConfigIO();
@@ -60,6 +61,7 @@ public:
 
     // Public so the host test can drive a round trip without a filesystem.
     static void S_write_to_file(File *f);
+    static SubsysResultCode_e S_heap_info(SubsysCommand *cmd);
     static bool S_read_from_file(File *f, StreamTextLog *log);
 };
 

@@ -5,6 +5,17 @@
 #include "assembly_search.h"
 #include "assembly_entry.h"
 #include "assembly.h"
+#include "network_config.h"
+
+
+#define DEFAULT_HOSTNAME_ASS  "hackerswithstyle.se"
+#define DEFAULT_HOSTPORT      80
+#define DEFAULT_URL_SEARCH_ASS "/leet/search/aql/0/100?query="
+#define DEFAULT_URL_PATTERNS  "/leet/search/aql/presets"
+#define DEFAULT_URL_ENTRIES   "/leet/search/entries"
+#define DEFAULT_URL_DOWNLOAD  "/leet/search/bin"
+// Keep the existing server-facing identity for compatibility.
+#define DEFAULT_CLIENTID_ASS  "Spiffy"
 
 /****************************/
 /* AssemblySearch UI Object */
@@ -43,6 +54,7 @@ AssemblySearch :: AssemblySearch(UserInterface *ui, Browsable *root) : TreeBrows
 
 AssemblySearch :: ~AssemblySearch()
 {
+    if (assembly_gui.active_search == this) assembly_gui.active_search = NULL;
     printf("And there goes our Assembly browser!"); 
 }
 
@@ -118,7 +130,7 @@ int AssemblySearch :: handle_key(int c)
             state->down(window->get_size_y()/2);
             break;
         case KEY_TASKS:
-            ret = MENU_CLOSE; // do nothing in the non-commodore mode
+            ret = MENU_CLOSE; // do nothing in the non-commercial mode
             break;
         case KEY_HELP: 
             state->refresh = true;
@@ -258,7 +270,7 @@ void AssemblySearchForm :: send_query(void)
             if (results) {
                 delete results;
             }
-            BrowsableQueryResults *rb = new BrowsableQueryResults((JSON_List *)response);
+            BrowsableQueryResults *rb = new BrowsableQueryResults((JSON_List *)response, browser->window->get_size_x());
             results = rb;
             deeper = new AssemblyResultsView(rb, browser, 1);
             deeper->previous = this;
@@ -376,9 +388,73 @@ void AssemblyResultsView :: get_entries()
 
 }
 
+void AssemblyResultsView :: move_to_index(int idx)
+{
+    TreeBrowserState::move_to_index(idx);
+    show_status();
+}
+
+void AssemblyResultsView :: draw()
+{
+    TreeBrowserState::draw();
+    show_status();
+}
+
+void AssemblyResultsView :: show_status()
+{
+    BrowsableQueryResult *item = (BrowsableQueryResult *)under_cursor;
+    if (!item)
+        return;
+    mstring infostr;
+    infostr += item->getUpdated();
+    infostr += " ";
+    int y = item->getYear();
+    if ((y>=1000)&&(y<=9999))
+        infostr += y;
+    else
+        infostr += "    ";
+    infostr += " cat:";
+    infostr += item->getCategory();
+    browser->window->getScreen()->set_status(infostr.c_str(), browser->user_interface->color_status);
+}
+
 void BrowsableAssemblyRoot :: fetchPresets(void)
 {
-    presets = assembly.get_presets();
+    presets = assembly.get_presets(server_data);
+}
+
+IndexedList<Browsable *> *BrowsableAssemblyRoot::getSubItems(int &error)
+{
+    // name, group, handle, event, date*, category*, subcat*, rating*, type*, repo*, latest, sort, order
+    if (children.get_elements() == 0) {
+            children.append(new BrowsableStatic(server_data->title.c_str()));
+            children.append(new BrowsableStatic(""));
+            children.append(new BrowsableQueryField("name", NULL));
+            children.append(new BrowsableQueryField("group", NULL));
+            children.append(new BrowsableQueryField("handle", NULL));
+            children.append(new BrowsableQueryField("event", NULL));
+            if (presets && (presets->type() == eList)) {
+                JSON_List *list = (JSON_List *)presets;
+                for (int i = 0; i < list->get_num_elements(); i++) {
+                    JSON_Object *obj = (JSON_Object *)(*list)[i];
+                    JSON *type = obj->get("type");
+                    JSON *values = obj->get("values");
+                    if (type && type->type() == eString && values && values->type() == eList) {
+                        children.append(new BrowsableQueryField(((JSON_String *)type)->get_string(), (JSON_List *)values));
+                    }
+                }
+            }
+            children.append(new BrowsableStatic(""));
+            children.append(new BrowsableStatic(""));
+            children.append(new BrowsableQueryField("$", NULL));
+
+          if (children.get_elements() < 16) {
+            children.append(new BrowsableStatic(""));
+            children.append(new BrowsableStatic("You agree you have a necessary license"));
+            children.append(new BrowsableStatic("or rights to download any software."));
+          }
+    }
+    return &children;
 }
 
 #include "browsable_root.h"
@@ -411,4 +487,326 @@ IndexedList<Browsable *> *BrowsableQueryResult :: getSubItems(int &error)
     return &children;
 }
 
+BrowsableQueryResult :: BrowsableQueryResult(JSON_Object *result, int window_width) : path("/a64")
+{
+    JSON *j;
+    year = 0;
+
+    j = result->get("name");
+    if (j && j->type() == eString) {
+        summary = ((JSON_String *)j)->get_string();
+    }
+    j = result->get("year");
+    if (j && j->type() == eInteger) {
+        year = ((JSON_Integer *)j)->get_value();
+    }
+    j = result->get("group");
+    if (j && j->type() == eString) {
+        summary += " ";
+        summary2 += "\e\x0d";
+        summary2 += ((JSON_String *)j)->get_string();
+        int l = summary.length()+summary2.length()-2; // subtract 2 characters for escape codes
+        if (year && (l+5<=window_width)) {
+            summary2 += ",";
+            summary2 += year;
+        }
+        l = summary.length()+summary2.length()-2; // subtract 2 characters for escape codes
+        while (l++ < window_width)
+            summary += " ";
+    }
+    category = 0;
+    j = result->get("category");
+    if (j && j->type() == eInteger) {
+        category = ((JSON_Integer *)j)->get_value();
+    }
+    j = result->get("id");
+    if (j && j->type() == eString) {
+        id = ((JSON_String *)j)->get_string();
+    }
+    j = result->get("updated");
+    if (j && j->type() == eString) {
+        updated = ((JSON_String *)j)->get_string();
+    }
+    path.cd(id.c_str());
+    char catstr[8];
+    sprintf(catstr, "%d", category);
+    path.cd(catstr);
+}
+
+void BrowsableQueryResult :: getDisplayString(char *buffer, int width, UserInterface *ui)
+{
+    bool extra = (summary.length()<width);
+    if (extra)
+        width += 2;
+    memset(buffer, ' ', width);
+    buffer[width] = '\0';
+
+    strncpy(buffer, summary.c_str(), width);
+    if (extra)
+    {
+        strncpy(&buffer[summary.length()], summary2.c_str(), width-summary.length());
+    }
+}
+
+AssemblyInGui::AssemblyInGui() {
+    active_search = NULL;
+    root = NULL;
+    dbselection = 0;
+    server_count = 0;
+
+    taskItemCategory = TasksCollection :: getCategory("Assembly 64", SORT_ORDER_ASSEMBLY);
+}
+
+#define JSON_GET(j, name) \
+    ((j && (j->type() == eObject)) ? ((JSON_Object*) j)->get(name) : NULL)
+
+#define JSON_GET_STRING(obj, name, s) \
+    j = JSON_GET(obj, name); \
+    if (j && (j->type() == eString)) \
+        s = ((JSON_String*) j)->get_string();
+
+#define JSON_GET_INTEGER(obj, name, v) \
+    j = JSON_GET(obj, name); \
+    if (j && (j->type() == eInteger)) \
+        v = ((JSON_Integer*) j)->get_value();
+
+int AssemblyInGui::load_custom()
+{
+#ifndef RECOVERYAPP
+    const char* branding_directory = "/Flash/config";
+
+    ConfigManager *cm = ConfigManager :: getConfigManager();
+    if (cm->get_safe_mode())
+        return 0;
+
+    FileManager *fm = FileManager::getFileManager();
+    size_t bufferSize = 4096;
+    char* jsonText = (char*) malloc(bufferSize);
+    if (!jsonText)
+        return 0;
+
+    uint32_t jsonTextSize=0;
+    JSON *obj = NULL;
+    FRESULT fres = fm->load_file(branding_directory, "server.json", (uint8_t*) jsonText, bufferSize, &jsonTextSize);
+
+    if ((fres != 0)||(jsonTextSize == 0)) {
+        free(jsonText);
+        return 0;
+    }
+
+    server_count = 0;
+    printf("Loading server.json...\n");
+    convert_text_to_json_objects(jsonText, (size_t) jsonTextSize, 512, &obj);
+    do {
+        if (!obj) {
+            printf("Invalid JSON data!\n");
+            break;
+        }
+
+        printf("Evaluating server.json file...\n");
+        JSON* j = JSON_GET(obj, "assembly64");
+        JSON_List* l = (j && (j->type() == eList)) ? (JSON_List*) j : NULL;
+        if (!l)
+            break;
+
+        int max_count = l->get_num_elements();
+        if (max_count < 1)
+            break;
+        if (max_count > 8)
+            max_count = 8;
+
+        ServerList = new SearchService*[max_count];
+        if (!ServerList)
+            break;
+
+        for (int i=0;i < max_count;i++) {
+            JSON* e = (*l)[i];
+            if (e && (e->type() == eObject)) {
+                // set useful defaults
+                const char* name      = "no name";
+                const char* host      = DEFAULT_HOSTNAME_ASS;
+                int         port      = DEFAULT_HOSTPORT;
+                const char* client_id = DEFAULT_CLIENTID_ASS;
+                const char* usearch   = DEFAULT_URL_SEARCH_ASS;
+                const char* upatterns = DEFAULT_URL_PATTERNS;
+                const char* uentries  = DEFAULT_URL_ENTRIES;
+                const char* udownload = DEFAULT_URL_DOWNLOAD;
+
+                JSON_GET_STRING(e, "name",         name);
+                JSON_GET_STRING(e, "host",         host);
+                JSON_GET_INTEGER(e,"port",         port);
+                JSON_GET_STRING(e, "client-id",    client_id);
+                JSON_GET_STRING(e, "url-search",   usearch);
+                JSON_GET_STRING(e, "url-patterns", upatterns);
+                JSON_GET_STRING(e, "url-entries",  uentries);
+                JSON_GET_STRING(e, "url-download", udownload);
+
+                if (port < 1 || port > 65535 || !host[0] || strchr(host, '\r') || strchr(host, '\n')) continue;
+                ServerList[server_count++] = new SearchService(
+                    name, host, port, client_id,
+                    usearch, upatterns, uentries, udownload);
+            }
+        }
+    } while (0);
+
+    delete obj;
+    free(jsonText);
+#endif
+    return server_count;
+}
+
+int AssemblyInGui::get_servers()
+{
+    if ((!ServerList)||(!server_count))
+        server_count = load_custom();
+
+    if ((!ServerList)||(!server_count)) {
+        delete [] ServerList;
+        ServerList = new SearchService*[1];
+        server_count = 0;
+        ServerList[server_count++] =
+            new SearchService("Assembly 64",
+                              DEFAULT_HOSTNAME_ASS, DEFAULT_HOSTPORT,
+                              DEFAULT_CLIENTID_ASS,
+                              DEFAULT_URL_SEARCH_ASS,
+                              DEFAULT_URL_PATTERNS,
+                              DEFAULT_URL_ENTRIES,
+                              DEFAULT_URL_DOWNLOAD);
+    }
+
+    if (!ServerNameList) {
+        printf("search service server:\n");
+        ServerNameList = new const char*[server_count+1];
+        for (int i=0;i<server_count;i++) {
+            ServerNameList[i] = ServerList[i]->name;
+            printf("server %i: %s\n", i, ServerNameList[i]);
+        }
+    }
+
+    return server_count;
+}
+
+const char** AssemblyInGui::ServerNameList = NULL;
+SearchService** AssemblyInGui::ServerList = NULL;
+int AssemblyInGui::server_count = 0;
+
 AssemblyInGui assembly_gui;
+
+#if U64 == 1 && !defined(RECOVERYAPP)
+#include "server_editor_json.h"
+
+static JSON_Object *server_defaults(const char *name, const char *host, int port)
+{
+    return JSON::Obj()->add("name", name)->add("host", host)->add("port", port)
+        ->add("client-id", DEFAULT_CLIENTID_ASS)->add("url-search", DEFAULT_URL_SEARCH_ASS)
+        ->add("url-patterns", DEFAULT_URL_PATTERNS)->add("url-entries", DEFAULT_URL_ENTRIES)
+        ->add("url-download", DEFAULT_URL_DOWNLOAD);
+}
+static bool edit_server(UserInterface *ui, JSON_Object *server)
+{
+    const char *labels[] = {"Name", "Host (DNS / IPv4, no http://)", "Port", "Client ID", "Search URL", "Presets URL", "Entries URL", "Download URL", "Done"};
+    const char *keys[] = {"name", "host", "port", "client-id", "url-search", "url-patterns", "url-entries", "url-download"};
+    const char *defaults[] = {"Local files", "192.168.1.100", "8000", DEFAULT_CLIENTID_ASS, DEFAULT_URL_SEARCH_ASS, DEFAULT_URL_PATTERNS, DEFAULT_URL_ENTRIES, DEFAULT_URL_DOWNLOAD};
+    for (;;) {
+        int field = ui->choice("Edit search server", labels, 9);
+        if (field < 0 || field == 8) return true;
+        char value[257];
+        if (field == 2) snprintf(value, sizeof(value), "%d", server->int_or("port", 80));
+        else {
+            const char *current = server->string_or(keys[field], defaults[field]);
+            if (strlen(current) > 256) { ui->popup("Field exceeds editor limit.\nEdit this field in server.json.", BUTTON_OK); continue; }
+            strcpy(value, current);
+        }
+        if (ui->string_box(labels[field], value, field == 2 ? 5 : field == 0 ? 32 : field == 1 ? 127 : field == 3 ? 32 : 256) < 0) continue;
+        bool valid = field == 1 ? server_editor_host_valid(value) :
+            field == 2 ? server_editor_port(value) > 0 :
+            field >= 4 ? server_editor_path_valid(value) : server_editor_header_valid(value);
+        if (!valid) { ui->popup("Invalid value.\nHost: DNS name or IPv4 only.\nPort: 1-65535. URLs start /.", BUTTON_OK); continue; }
+        if (field == 2) server->set(keys[field], server_editor_port(value));
+        else server->set(keys[field], value);
+    }
+}
+#include "server_editor_file.h"
+
+SubsysResultCode_e AssemblyInGui::S_EditServers(SubsysCommand *cmd)
+{
+    UserInterface *ui = cmd->user_interface;
+    if (!ui) return SSRET_NO_USER_INTERFACE;
+    if (ConfigManager::getConfigManager()->get_safe_mode()) {
+        ui->popup("Server editing is disabled\nin safe mode.", BUTTON_OK); return SSRET_OK;
+    }
+    FileManager *fm = FileManager::getFileManager();
+    File *file = NULL; JSON *document = NULL;
+    FRESULT result = fm->fopen("/Flash/config/server.json", FA_READ, &file);
+    if (result == FR_OK) {
+        uint32_t length = file->get_size(), read = 0;
+        char *text = new char[4097];
+        bool valid = length > 0 && length < 4096;
+        if (valid) valid = file->read(text, length, &read) == FR_OK && read == length;
+        fm->fclose(file);
+        if (valid) { text[length] = 0; valid = server_editor_input_supported(text, length) && convert_text_to_json_objects(text, length, 512, &document) > 0; }
+        if (valid) valid = server_editor_decode_tree(document);
+        delete[] text;
+        if (!valid || !document || document->type() != eObject) {
+            delete document; ui->popup("Cannot edit server.json.\nInvalid JSON or file too large.\nExisting file was kept.", BUTTON_OK); return SSRET_OK;
+        }
+    } else if (result == FR_NO_FILE || result == FR_NO_PATH) {
+        document = JSON::Obj()->add("assembly64", JSON::List()->add(server_defaults("Assembly64", DEFAULT_HOSTNAME_ASS, 80)));
+    } else {
+        ui->popup("Cannot read server.json.\nExisting file was kept.", BUTTON_OK); return SSRET_OK;
+    }
+    JSON *list = ((JSON_Object *)document)->get("assembly64");
+    if (!list || list->type() != eList || ((JSON_List *)list)->get_num_elements() > 8) {
+        delete document; ui->popup("Expected assembly64 list\nwith at most 8 servers.\nExisting file was kept.", BUTTON_OK); return SSRET_OK;
+    }
+    JSON_List *servers = (JSON_List *)list;
+    bool valid = true;
+    for (int i = 0; i < servers->get_num_elements(); ++i) if ((*servers)[i]->type() != eObject) valid = false;
+    if (!valid) { delete document; ui->popup("Invalid server entry.\nExisting file was kept.", BUTTON_OK); return SSRET_OK; }
+    const char *actions[] = {"Add local server", "Edit server", "Delete server", "Save and exit", "Cancel"};
+    for (;;) {
+        int action = ui->choice("Assembly64 server editor", actions, 5);
+        if (action < 0 || action == 4) {
+            if (ui->popup("Discard editor changes?", BUTTON_OK | BUTTON_CANCEL) == BUTTON_OK) break;
+            continue;
+        }
+        int count = servers->get_num_elements();
+        if (action == 0) {
+            if (count == 8) { ui->popup("Maximum 8 servers.", BUTTON_OK); continue; }
+            JSON_Object *entry = server_defaults("Local files", "192.168.1.100", 8000);
+            edit_server(ui, entry); servers->add(entry);
+        } else if (action == 1 || action == 2) {
+            if (!count) { ui->popup("No servers. Add one first.", BUTTON_OK); continue; }
+            const char *names[8]; char display[8][33];
+            for (int i = 0; i < count; ++i) {
+                const char *name = ((JSON_Object *)(*servers)[i])->string_or("name", "Unnamed server");
+                int j = 0;
+                for (; j < 32 && name[j]; ++j) { unsigned char c = name[j]; display[i][j] = c < 32 || c >= 127 ? '?' : c; }
+                display[i][j] = 0; names[i] = display[i];
+            }
+            int selected = ui->choice("Choose server", names, count);
+            if (selected < 0) continue;
+            JSON_Object *entry = (JSON_Object *)(*servers)[selected];
+            if (action == 1) edit_server(ui, entry);
+            else if (ui->popup("Delete this server?", BUTTON_OK | BUTTON_CANCEL) == BUTTON_OK) { servers->remove(entry); delete entry; }
+        } else if (action == 3) {
+            if (!count) { ui->popup("Keep at least one server.", BUTTON_OK); continue; }
+            bool all_valid = true;
+            for (int i = 0; i < count; ++i) if (!server_editor_entry_valid((JSON_Object *)(*servers)[i])) all_valid = false;
+            if (!all_valid) { ui->popup("Invalid server settings.\nEdit host, port and URL fields\nbefore saving.", BUTTON_OK); continue; }
+            result = save_servers(document);
+            ui->popup(result == FR_OK ? "Servers saved.\nReboot to load the changes.\nPrevious file: server.json.bak" : "Could not save servers.\nCheck Flash space / permissions.\nInspect server.json and .bak.", BUTTON_OK);
+            if (result == FR_OK) break;
+        }
+    }
+    delete document;
+    return SSRET_OK;
+}
+#endif
+
+SubsysResultCode_e BrowsableAssemblyRoot::new_search(SubsysCommand *cmd)
+{
+    if (!cmd->user_interface) return SSRET_NO_USER_INTERFACE;
+    AssemblyInGui::S_OpenSearch(cmd->user_interface);
+    return SSRET_OK;
+}

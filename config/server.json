@@ -1,0 +1,14 @@
+{
+  "assembly64": [
+    {
+      "name": "Assembly64",
+      "host": "hackerswithstyle.se",
+      "port": 80,
+      "client-id": "Spiffy",
+      "url-search": "/leet/search/aql/0/100?query=",
+      "url-patterns": "/leet/search/aql/presets",
+      "url-entries": "/leet/search/entries",
+      "url-download": "/leet/search/bin"
+    }
+  ]
+}

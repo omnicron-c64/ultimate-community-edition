@@ -41,7 +41,10 @@ public:
 #define KEY_CTRL_J 0x0A
 #define KEY_CTRL_L 0x0C
 #define KEY_CTRL_N 0x0E
+#define KEY_CTRL_F 0x06
 #define KEY_CTRL_O 0x0F
+#define KEY_CTRL_X 0x18
+#define KEY_CTRL_Z 0x1A
 #define KEY_CTRL_V 0x16
 
 // Combinations that cannot use their ASCII control code, because that code is

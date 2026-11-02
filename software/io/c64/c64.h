@@ -9,6 +9,8 @@
 #include "config.h"
 #include "iomap.h"
 
+int swap_joystick();
+
 #define ROMS_DIRECTORY "/flash/roms"
 
 #define REU_MEMORY_BASE 0x1000000

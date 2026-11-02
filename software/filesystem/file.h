@@ -41,6 +41,7 @@ public:
     }
 
     // functions for reading and writing files
+    virtual void abort_write(void) { } // Discard deferred writes after an upstream copy failure.
     virtual FRESULT close(void) { delete this; return FR_NO_FILESYSTEM; }
     virtual FRESULT sync(void) { return FR_NO_FILESYSTEM; }
     virtual FRESULT read(void *buffer, uint32_t len, uint32_t *transferred) { return FR_NO_FILESYSTEM; }

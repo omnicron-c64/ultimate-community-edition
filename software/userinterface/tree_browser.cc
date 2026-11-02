@@ -5,6 +5,7 @@
 /*                                                                            */
 /* ========================================================================== */
 #include "tree_browser.h"
+#include "ftp_transfer_ui.h"
 #include "tree_browser_state.h"
 #include "config_menu.h"
 #include "context_menu.h"
@@ -44,6 +45,7 @@ TreeBrowser :: TreeBrowser(UserInterface *ui, Browsable *root) : UIObject(ui)
 	window = NULL;
     keyb = NULL;
     title = NULL;
+    pick_label = "<< Use this folder >>";
     contextMenu = NULL;
     quick_seek_length = 0;
     quick_seek_string[0] = '\0';
@@ -90,8 +92,8 @@ void TreeBrowser :: init() // call on root!
 	this->screen = user_interface->get_screen();
     this->keyb   = user_interface->get_keyboard();
 
-    screen->move_cursor(screen->get_size_x() - (int)strlen(c_help_footer_label) - 1, screen->get_size_y() - 1);
-    screen->output("\eAF3=HELP\eO");
+    screen->move_cursor(screen->get_size_x() - (int)strlen(pick_mode == PICK_NONE ? c_help_footer_label : "SELECT FOLDER") - 1, screen->get_size_y() - 1);
+    screen->output(pick_mode == PICK_NONE ? "\eAF3=HELP\eO" : "\eASELECT FOLDER\eO");
 
 	window = new Window(screen, 0, 2, screen->get_size_x(), screen->get_size_y()-3);
     if(has_border) {
@@ -221,6 +223,7 @@ int TreeBrowser :: poll(int sub_returned)
         state->do_refresh();
 	}
 
+    get_ui()->show_heap_info();
     c = keyb->getch();
     c = get_ui()->keymapper(c, e_keymap_default);
 
@@ -393,7 +396,10 @@ int TreeBrowser :: handle_key(int c)
                 if (state->under_cursor->getSortOrder() == ET_PICKER) {
                     return pick_current();
                 }
-                context(0);
+                if (pick_mode == PICK_PATH) {
+                    // Folder selection is navigation, never a file-operation menu.
+                    state->into2(); // Unsupported/non-directory entries simply stay put.
+                } else context(0);
                 return 0;
             case KEY_RIGHT:
                 reset_quick_seek();
@@ -420,6 +426,10 @@ int TreeBrowser :: handle_key(int c)
                 picked = false;
                 return MENU_CLOSE;
             default:
+                // The picker owns a private modal loop. Do not launch windows,
+                // file actions, monitor, reset or search on the main focus stack.
+                if (!(c == KEY_UP || c == KEY_DOWN || c == KEY_PAGEUP || c == KEY_PAGEDOWN ||
+                      (c >= 32 && c <= 126))) return 0;
                 break;
         }
     }
@@ -466,6 +476,7 @@ int TreeBrowser :: handle_key(int c)
             reset_quick_seek();
             ret = swap_interface_type(user_interface);
             break;
+        case KEY_CTRL_X:
         case KEY_CTRL_R: {
             // C=+R resets the C64 from the browser, the same key the machine
             // code monitor uses for it. This is a keyboard route to an action
@@ -490,6 +501,23 @@ int TreeBrowser :: handle_key(int c)
             ret = (int)(user_interface->menu_response_to_action);
             break;
         }
+        case KEY_CTRL_Z: {
+            reset_quick_seek();
+            SubsysCommand *cmd = new SubsysCommand(user_interface, SUBSYSID_C64, MENU_C64_REBOOT, 0);
+            cmd->execute();
+            ret = (int)user_interface->menu_response_to_action;
+            break;
+        }
+#if U64 == 1
+        case KEY_CTRL_F: { // C=+F / Ctrl+F: existing board power-off command
+            reset_quick_seek();
+            SubsysCommand *cmd = new SubsysCommand(user_interface, SUBSYSID_C64,
+                                                   MENU_C64_POWEROFF, 0);
+            cmd->execute();
+            ret = (int)user_interface->menu_response_to_action;
+            break;
+        }
+#endif
         case KEY_CTRL_O:
             reset_quick_seek();
             state->refresh = true;
@@ -659,7 +687,7 @@ void TreeBrowser::paste(void)
     user_interface->show_progress("Copying...", items);
     for (int i = 0; i < items; i++) {
         const char *fn = clipboard.getFileNameByIndex(i);
-        FRESULT res = fm->fcopy(clipboard.getPath(), fn, this->getPath(), fn, false);  // from path, filename, dest path
+        FRESULT res = copy_with_ftp_progress(user_interface, fm, clipboard.getPath(), fn, this->getPath(), fn, false, true);  // from path, filename, dest path
         if (res != FR_OK) {
             user_interface->hide_progress(); // temporarily
             printf("Error while copying: %s %s to %s\n", FileSystem::get_error_string(res), fn, this->getPath());
@@ -740,7 +768,7 @@ void TreeBrowser :: prepend_headers()
         break;
     case PICK_PATH:
         if (fm->is_path_writable(path)) {
-            state->children->prepend(new BrowsablePicker("<< Select Current Dir >>", ET_PICKER));
+            state->children->prepend(new BrowsablePicker(pick_label, ET_PICKER));
         }
         break;
     default:
@@ -767,10 +795,10 @@ bool TreeBrowser :: can_pick(Browsable *entry)
     if (entry->getSortOrder() == ET_PICKER) {
         return true;
     }
-    if (!entry->isSelectable()) {
+    if (pick_mode == PICK_PATH || !entry->isSelectable()) {
         return false;
     }
-    // TODO: Is this always allowed?
+    // Only file pickers may select ordinary file entries.
     FileInfo *info = ((BrowsableDirEntry *)entry)->getFileInfo();
     return info && !(info->attrib & (AM_DIR | AM_VOL));
 }
@@ -822,18 +850,21 @@ int swap_joystick()
     return 0;
 }
 
-int pick_path(UserInterface *ui, mstring& path_out)
+int pick_path(UserInterface *ui, mstring& path_out, const char *title, const char *label)
 {
     if (!ui) {
         return false;
     }
 
+    UIObject *parent = ui->focused_object();
     Browsable *root = new BrowsableRoot();
     TreeBrowser *browser = new TreeBrowser(ui, root);
     browser->allow_exit = true;
     browser->has_border = true;
     browser->use_ui_focus_stack = false;
-    browser->title = "Select Path";
+    browser->title = title;
+    browser->pick_label = label;
+    browser->allow_tasks = false;
     browser->pick_mode = TreeBrowser::PICK_PATH;
     browser->init();
 
@@ -851,5 +882,6 @@ int pick_path(UserInterface *ui, mstring& path_out)
     browser->deinit();
     delete browser;
     delete root;
+    if (parent && ui->has_focus(parent)) parent->redraw();
     return picked;
 }

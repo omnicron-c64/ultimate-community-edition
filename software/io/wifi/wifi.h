@@ -17,6 +17,7 @@
 #include "size_str.h"
 //#include "network_esp32.h"
 #include "wifi_cmd.h"
+#include "wifi_connection_feedback.h"
 
 // This class provides an interface to the WiFi module, to manage and program it
 typedef enum {
@@ -41,7 +42,12 @@ class WiFi : public Esp32Application
     NetworkLWIP_WiFi *netstack;
 
     WifiState_t state;
-    char    last_ap[32];
+    volatile unsigned lastDisconnectReason;
+    WifiConnectionFeedback connectionFeedback;
+    WifiState_t scanReturnState;
+    bool scanAttempted;
+    int scanResult;
+    char    last_ap[33];
     char    moduleName[34];
     char    moduleType[24];
     uint8_t my_mac[6];
@@ -63,13 +69,17 @@ public:
     BaseType_t doRequestEcho(void);
 
     WifiState_t getState(void) { return state; }
-    const char *getLastAP(void) { return (state == eWifi_Connected) ? last_ap : "-"; }
+    bool canTransmit(void) { return state == eWifi_Connected ||
+        (state == eWifi_Scanning && scanReturnState == eWifi_Connected); }
+    const char *getLastAP(void) { return canTransmit() ? last_ap : "-"; }
     const char *getModuleName(void) { return moduleName; }
     const char *getModuleType(void) { return moduleType; }
     void  getMacAddr(uint8_t *target) { memcpy(target, my_mac, 6); }
     char *getIpAddrString(char *buf, int max) { sprintf(buf, "%d.%d.%d.%d", (my_ip >> 0) & 0xff, (my_ip >> 8) & 0xff, (my_ip >> 16) & 0xff, (my_ip >> 24) & 0xff); return buf; }
 
     void sendEvent(uint8_t code);
+    int connectWithFeedback(UserInterface *ui, const char *ssid, const char *password, uint8_t auth, int savedSlot = -1);
+    unsigned getDisconnectReason() const { return lastDisconnectReason; }
     void sendConnectEvent(const char *ssid, const char *pass, uint8_t auth);
     void freeBuffer(command_buf_t *buf);
     int  getAccessPointItems(Browsable *parent, IndexedList<Browsable *> &list);
@@ -96,19 +106,25 @@ extern WiFi wifi;
 class BrowsableWifiAP : public Browsable
 {
     Browsable *parent;
-    char ssid[32];
+    char ssid[33];
     int8_t dbm;
     uint8_t auth;
 public:
     BrowsableWifiAP(Browsable *parent, char *ssid, int8_t dbm, uint8_t auth) {
         this->parent = parent;
         strncpy(this->ssid, ssid, 32);
+        this->ssid[32] = 0;
         this->dbm = dbm;
         this->auth = auth;
     }
 
     void getDisplayString(char *buffer, int width, UserInterface *ui) {
-        sprintf(buffer, "%#s%5d", 31, ssid, dbm);
+        char display[33];
+        for (int i = 0; i < 33; ++i) {
+            unsigned char c = ssid[i];
+            display[i] = (c && (c < 32 || c == 127)) ? '?' : c;
+        }
+        sprintf(buffer, "%#s%5d", 31, display, dbm);
     }
 
     void fetch_context_items(IndexedList<Action *>&items);

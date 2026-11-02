@@ -56,12 +56,18 @@ class BrowsableFTPServer : public BrowsableDirEntry
 {
     static SubsysResultCode_e S_edit(SubsysCommand *cmd);
     static SubsysResultCode_e S_remove(SubsysCommand *cmd);
+    static SubsysResultCode_e S_connection(SubsysCommand *cmd);
 public:
     BrowsableFTPServer(FTPServer *serv, Path *p, Browsable *parent, FileInfo *inf) : BrowsableDirEntry(p, parent, inf, true) {}
     virtual ~BrowsableFTPServer() {}
 
     virtual void fetch_context_items(IndexedList<Action *>&items) {
         items.append(new Action("Enter",  UserFileInteraction:: S_enter, 0));
+        items.append(new Action("Test connection", S_connection, 0, 0, this));
+        items.append(new Action("Reconnect", S_connection, 1, 0, this));
+        items.append(new Action("Disconnect", S_connection, 2, 0, this));
+        items.append(new Action("Status / last transfer", S_connection, 3, 0, this));
+        items.append(new Action("Refresh directory", S_connection, 4, 0, this));
         items.append(new Action("Edit",   BrowsableFTPServer :: S_edit, 0, 0, this));
         items.append(new Action("Remove", BrowsableFTPServer :: S_remove, 0, 0, this));
     }
@@ -102,7 +108,7 @@ public:
     FileSystemFTP(FTPServer *serv);
     ~FileSystemFTP();
 
-    FTPClient *get_client() { return client; }
+    FTPClient *get_client() { if (!client) client = new FTPClient(); return client; }
     int connect_if_needed();
     void drop_connection();
 
@@ -122,10 +128,12 @@ class FileOnFTP : public File
     static uint32_t node_count;
     bool needs_upload;          // STOR on close?
     mstring remote_path;        // full FTP path for upload
+    mstring temp_path;
+    bool write_failed;
 
 public:
-    FileOnFTP(FileSystem *fs, File *wrapped, const char *ftp_path = NULL, bool upload = false)
-        : File(fs), cached(wrapped), needs_upload(upload), remote_path(ftp_path ? ftp_path : "")
+    FileOnFTP(FileSystem *fs, File *wrapped, const char *ftp_path = NULL, bool upload = false, const char *temp = "")
+        : File(fs), cached(wrapped), needs_upload(upload), remote_path(ftp_path ? ftp_path : ""), temp_path(temp), write_failed(false)
     {
         node_count++;
         inode = node_count;
@@ -134,11 +142,13 @@ public:
 
     FRESULT close(void);
 
+    void abort_write(void) { write_failed = true; needs_upload = false; }
     FRESULT sync(void) { return cached ? cached->sync() : FR_INT_ERR; }
     FRESULT read(void *buffer, uint32_t len, uint32_t *transferred) { return cached ? cached->read(buffer, len, transferred) : FR_INT_ERR; }
     FRESULT write(const void *buffer, uint32_t len, uint32_t *transferred) {
         if (cached) {
             FRESULT fres = cached->write(buffer, len, transferred);
+            if (fres != FR_OK || *transferred != len) write_failed = true;
             if (fres == FR_OK) { // write successful
                 needs_upload = true;
             }
@@ -170,6 +180,7 @@ public:
     }
 
     FRESULT list(const char *path);
+    static bool accept_line(void *, const char *, bool);
     FRESULT get_entry(FileInfo &info);
 };
 
@@ -186,6 +197,7 @@ public:
     FTPServer(CachedTreeNode *par, const char *alias, const char *host, const char *port_str,
               const char *user, const char *passw, const char *folder);
     
+    virtual const char *get_name() { return alias.c_str(); }
     void drop_connection(void) {
         FileSystemFTP *fs = (FileSystemFTP *)(get_file_info()->fs);
         if (fs) {

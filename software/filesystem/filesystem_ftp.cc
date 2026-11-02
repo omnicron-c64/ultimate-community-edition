@@ -3,7 +3,7 @@
  *
  * FTP remote filesystem — mounts an FTP server as a browsable
  * directory in the file tree. Files are downloaded to /Temp/ on
- * first access (lazy caching).
+ * each open into an isolated temporary file.
  */
 
 #include "filesystem_ftp.h"
@@ -12,6 +12,8 @@
 #include "network_config.h"
 #include "init_function.h"
 #include "json.h"
+#include "server_editor_json.h"
+#include "userinterface.h"
 extern "C" {
 void url_decode(char *src, char *dest, int max);
 }
@@ -22,6 +24,7 @@ void url_decode(char *src, char *dest, int max);
 /*************************************************************/
 /* FileSystemFTP                                             */
 /*************************************************************/
+struct FTPExists { const char *name; bool found; bool unsupported; };
 uint32_t FileOnFTP::node_count = 0;
 
 FileSystemFTP::FileSystemFTP(FTPServer *s) : FileSystem(0), client(NULL), connected(false), server(s)
@@ -47,7 +50,7 @@ int FileSystemFTP::connect_if_needed()
     }
     connected = false;
 
-    printf("[FTP-FS] Connecting to %s:%d as '%s'\n", server->host.c_str(), server->port, server->user.c_str() );
+
 
     if (client->open(server->host.c_str(), server->port) < 0) {
         printf("[FTP-FS] Connection failed\n");
@@ -60,7 +63,7 @@ int FileSystemFTP::connect_if_needed()
         return -1;
     }
 
-    client->type_binary();
+    if (client->type_binary() < 0) { client->disconnect(); return -1; }
 
     connected = true;
     printf("[FTP-FS] Connected OK\n");
@@ -75,130 +78,7 @@ void FileSystemFTP::drop_connection()
     connected = false;
 }
 
-FRESULT FileOnFTP::close(void)
-{
-    if (!cached) {
-        delete this;
-        return FR_INT_ERR;
-    }
-
-    FRESULT ret = FR_OK;
-
-    if (needs_upload && remote_path.length() > 0) {
-        // Flush and rewind the temp file, then STOR to FTP
-        cached->sync();
-        uint32_t size = cached->get_size();
-        printf("[FTP-FS] Uploading %d bytes to '%s'\n", size, remote_path.c_str());
-        cached->seek(0);
-
-        FileSystemFTP *ftpfs = static_cast<FileSystemFTP *>(get_file_system());
-        if (ftpfs->connect_if_needed() == 0) {
-            if (ftpfs->get_client()->stor(remote_path.c_str(), cached) < 0) {
-                printf("[FTP-FS] STOR failed\n");
-                ret = FR_DISK_ERR;
-            }
-        } else {
-            ret = FR_DISK_ERR;
-        }
-    }
-
-    FileManager::getFileManager()->fclose(cached);
-    cached = NULL;
-    delete this;
-    return ret;
-}
-
-FRESULT FileSystemFTP::file_open(const char *filename, uint8_t flags, File **file)
-{
-    printf("[FTP-FS] file_open: '%s' flags=0x%02X\n", filename, flags);
-    *file = NULL;
-
-    // Build full FTP path for this file
-    mstring ftp_path;
-    build_ftp_path(filename, ftp_path);
-
-    // Build a clean filename for /Temp/ cache
-    char *fixed = new char[1 + strlen(filename)];
-    strcpy(fixed, filename);
-    fix_filename(fixed);
-
-    FileManager *fm = FileManager::getFileManager();
-
-    // mstring temp_path("/Temp/ftp_");
-    // temp_path += fixed;
-    // delete[] fixed;
-    mstring suggested_name(fixed);
-    delete[] fixed;
-
-    mstring tempdir;
-    fm->ensure_temp_directory("ftp", tempdir);
-
-    bool creating = (flags & FA_CREATE_ANY) != 0;
-
-    if (creating) {
-        // Create/open a temp file for creating; upload happens on close()
-        File *tmp = NULL;
-        flags |= FA_READ; // when writing back to FTP, we need to read it!
-        mstring canonical_path;
-        FRESULT fres = fm->create_temp_file("ftp", suggested_name.c_str(), flags, &tmp, &canonical_path);
-        // FRESULT fres = fm->fopen(temp_path.c_str(), flags, &tmp);
-        if (tmp) {
-            *file = new FileOnFTP(this, tmp, ftp_path.c_str(), true);
-        }
-        return fres;
-    }
-
-    // --- Read path: download from FTP if not cached ---
-    mstring fixed_temp_path;
-    FRESULT fres = fm->get_temp_path("ftp", suggested_name.c_str(), &fixed_temp_path);
-    if (fres != FR_OK) {
-        printf("[FTP-FS] Unable t oget temp path? %s\n", fixed_temp_path.c_str());
-        return fres;
-    }
-
-    FileInfo inf(128);
-    fres = fm->fstat(fixed_temp_path.c_str(), inf);
-    printf("[FTP-FS] cache '%s': %s\n", fixed_temp_path.c_str(), fres == FR_OK ? "HIT" : "MISS");
-
-    if (fres == FR_NO_FILE) {
-        if (connect_if_needed() < 0) {
-            return FR_DISK_ERR;
-        }
-
-        File *tmp = NULL;
-        // fres = fm->fopen(fixed_temp_path.c_str(), FA_WRITE | FA_CREATE_NEW | FA_CREATE_ALWAYS, &tmp);
-        mstring canonical_path;
-        fm->create_temp_file("ftp", suggested_name.c_str(), FA_WRITE | FA_CREATE_NEW | FA_CREATE_ALWAYS, &tmp, &canonical_path);
-        if (tmp) {
-            int bytes_read = 0;
-            int ret = client->retr(ftp_path.c_str(), tmp, &bytes_read);
-            fm->fclose(tmp);
-
-            if (ret < 0) {
-                printf("[FTP-FS] RETR '%s' failed\n", ftp_path.c_str());
-                return FR_DISK_ERR;
-            }
-            printf("[FTP-FS] Downloaded %d bytes\n", bytes_read);
-            fres = FR_OK;
-        }
-
-        if (fres != FR_OK) {
-            printf("[FTP-FS] Failed to save temp file: %d\n", fres);
-            return fres;
-        }
-    }
-
-    // Open the cached file for reading
-    File *temp = NULL;
-    flags &= ~FA_CREATE_ANY;
-    flags |= FA_READ; // when writing back to FTP, we need to read it!
-
-    fres = fm->fopen(fixed_temp_path.c_str(), flags, &temp);
-    if (temp) {
-        *file = new FileOnFTP(this, temp, ftp_path.c_str(), false);
-    }
-    return fres;
-}
+#include "ftp_file_transfer.h"
 
 FRESULT FileSystemFTP::dir_open(const char *path, Directory **dir)
 {
@@ -239,150 +119,26 @@ FRESULT DirectoryOnFTP::get_entry(FileInfo &info)
 /* FTP LIST Parse   */
 /********************/
 
-static bool parse_ftp_list_line(const char *line, char *name, int namesize, uint32_t *size, bool *is_dir)
+#include "ftp_listing_parser.h"
+
+bool DirectoryOnFTP::accept_line(void *context, const char *line, bool machine)
 {
-    *is_dir = false;
-    *size = 0;
-    name[0] = '\0';
-
-    if (!line || !line[0]) {
-        return false;
-    }
-
-    // Unix-style: "drwxr-xr-x  2 user group  4096 Jan 01 12:00 dirname"
-    if (line[0] == 'd' || line[0] == '-' || line[0] == 'l') {
-        *is_dir = (line[0] == 'd');
-
-        // Find the filename — it's after the date/time field.
-        // Skip permissions, links, owner, group, size, month, day, time/year
-        // Strategy: scan from the right for the name after the last time/year field
-        const char *p = line;
-        int fields = 0;
-        while (*p && fields < 8) {
-            // skip whitespace
-            while (*p == ' ' || *p == '\t') {
-                p++;
-            }
-            if (!*p) {
-                break;
-            }
-            // Parse size from field 4 (0-indexed)
-            if (fields == 4) {
-                *size = (uint32_t)strtoul(p, NULL, 10);
-            }
-            // skip field content
-            while (*p && *p != ' ' && *p != '\t') {
-                p++;
-            }
-            fields++;
-        }
-        // skip whitespace before filename
-        while (*p == ' ' || *p == '\t') {
-            p++;
-        }
-        if (*p) {
-            // For symlinks, strip " -> target"
-            const char *arrow = strstr(p, " -> ");
-            int len = arrow ? (int)(arrow - p) : (int)strlen(p);
-            // Trim trailing \r\n
-            while (len > 0 && (p[len - 1] == '\r' || p[len - 1] == '\n')) {
-                len--;
-            }
-            if (len >= namesize) {
-                len = namesize - 1;
-            }
-            memcpy(name, p, len);
-            name[len] = '\0';
-            return len > 0;
-        }
-        return false;
-    }
-
-    // Windows-style: "01-01-24  12:00PM  <DIR>  dirname" or "01-01-24  12:00PM  12345 filename"
-    if (line[0] >= '0' && line[0] <= '9') {
-        const char *p = line;
-        // Skip date
-        while (*p && *p != ' ') p++;
-        while (*p == ' ') p++;
-        // Skip time
-        while (*p && *p != ' ') p++;
-        while (*p == ' ') p++;
-        // <DIR> or size
-        if (strncmp(p, "<DIR>", 5) == 0) {
-            *is_dir = true;
-            p += 5;
-        } else {
-            *size = (uint32_t)strtoul(p, NULL, 10);
-        }
-        while (*p && *p != ' ') p++;
-        while (*p == ' ') p++;
-        // Remainder is filename
-        int len = (int)strlen(p);
-        while (len > 0 && (p[len - 1] == '\r' || p[len - 1] == '\n')) {
-            len--;
-        }
-        if (len >= namesize) {
-            len = namesize - 1;
-        }
-        memcpy(name, p, len);
-        name[len] = '\0';
-        return len > 0;
-    }
-
-    return false;
+    DirectoryOnFTP *self = (DirectoryOnFTP *)context;
+    char name[512]; uint32_t size; bool dir;
+    if (!ftp_entry(line, machine, name, sizeof(name), &size, &dir)) return false;
+    if (!name[0] || !strcmp(name, ".") || !strcmp(name, "..")) return true;
+    if (self->children.get_elements() >= 4096) return false;
+    FileInfo *info = new FileInfo(name);
+    info->attrib = dir ? AM_DIR : 0; info->size = size; info->fs = self->ftpfs;
+    get_extension(name, info->extension, true); self->children.append(info); return true;
 }
-
-FRESULT DirectoryOnFTP::list(const char *ftp_path)
+FRESULT DirectoryOnFTP::list(const char *path)
 {
-    if (ftpfs->connect_if_needed() < 0) {
-        printf("[FTP-FS] Not connected, cannot list '%s'\n", ftp_path);
-        return FR_NO_FILESYSTEM;
+    if (ftpfs->connect_if_needed() < 0) return FR_NOT_READY;
+    if (ftpfs->get_client()->list_lines(path, accept_line, this) < 0) {
+        UserInterface::postMessage(ftpfs->get_client()->last_error());
+        return FR_DISK_ERR;
     }
-
-    static const int kListBufSize = 16384;
-    char *buf = new char[kListBufSize];
-    if (!buf) {
-        return FR_NOT_ENOUGH_CORE;
-    }
-
-    int bytes_read = 0;
-    FTPClient *client = ftpfs->get_client();
-    if (client->list(ftp_path, buf, kListBufSize, &bytes_read) < 0) {
-        printf("[FTP-FS] LIST '%s' failed\n", ftp_path);
-        delete[] buf;
-        return FR_NO_PATH;
-    }
-
-    printf("[FTP-FS] LIST '%s': %d bytes\n", ftp_path, bytes_read);
-
-    // Parse line by line
-    char name[128];
-    uint32_t size;
-    bool is_dir;
-    char *line = buf;
-    while (line && *line) {
-        char *next = strchr(line, '\n');
-        if (next) {
-            *next = '\0';
-            next++;
-        }
-
-        if (parse_ftp_list_line(line, name, sizeof(name), &size, &is_dir)) {
-            // Skip . and ..
-            if (strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
-                FileInfo *inf = new FileInfo(name);
-                inf->attrib = (is_dir) ? AM_DIR : 0;
-                inf->size   = size;
-                inf->fs     = ftpfs;
-                get_extension(name, inf->extension, true);
-                children.append(inf);
-            }
-        }
-        line = next;
-    }
-
-    delete[] buf;
-    printf("[FTP-FS] '%s': %d entries\n", ftp_path, children.get_elements());
     return FR_OK;
 }
 
@@ -495,43 +251,41 @@ void FTPRootNode :: load_servers()
 
 FRESULT FTPRootNode :: save_servers()
 {
-    File *fo;
-    FileManager *fm = FileManager :: getFileManager();
-    fm->create_dir(CFG_FILEPATH);
-    FRESULT fres = fm->fopen(CFG_FILEPATH, FTP_SERVERS, FA_WRITE | FA_CREATE_ALWAYS, &fo);
-    if (fres != FR_OK) {
-        return fres;
+    FileManager *fm = FileManager::getFileManager();
+    JSON_Object *root = JSON::Obj(); JSON_List *servers = JSON::List();
+    root->add("version", 1); root->add("servers", servers);
+    for (int i = 0; i < children.get_elements(); ++i) {
+        FTPServer *s = (FTPServer *)children[i]; mstring encoded;
+        url_encode(s->passw.c_str(), encoded);
+        servers->add(JSON::Obj()->add("alias", s->alias.c_str())->add("host", s->host.c_str())
+            ->add("port", (int)s->port)->add("user", s->user.c_str())
+            ->add("password", encoded.c_str())->add("folder", s->folder.c_str()));
     }
-
-    JSON_Object *root = JSON::Obj();
-    JSON_List *servers = JSON::List();
-    root->add("version", 1);
-    root->add("servers", servers);
-
-    for (int i=0; i < children.get_elements(); i++) {
-        FTPServer *serv = (FTPServer *)children[i];
-        mstring encoded_password;
-        url_encode(serv->passw.c_str(), encoded_password);
-
-        servers->add(JSON::Obj()
-            ->add("alias", serv->alias.c_str())
-            ->add("host", serv->host.c_str())
-            ->add("port", (int)serv->port)
-            ->add("user", serv->user.c_str())
-            ->add("password", encoded_password.c_str())
-            ->add("folder", serv->folder.c_str()));
-    }
-
-    const char *text = root->render();
-    int len = strlen(text);
-    uint32_t transferred = 0;
-    fres = fo->write(text, len, &transferred);
-    if ((fres == FR_OK) && (transferred != (uint32_t)len)) {
-        fres = FR_DISK_ERR;
-    }
+    char *text = new char[12288]; ServerEditorJson writer(text, 12288);
+    if (!writer.write(root)) { delete root; delete[] text; return FR_INVALID_PARAMETER; }
     delete root;
-    fm->fclose(fo);
-    return fres;
+    FRESULT result = fm->create_dir(CFG_FILEPATH);
+    if (result != FR_OK && result != FR_EXIST) { delete[] text; return result; }
+    File *file = NULL;
+    result = fm->fopen(CFG_FILEPATH, "ftp_servers.tmp", FA_WRITE | FA_CREATE_ALWAYS, &file);
+    uint32_t written = 0; size_t size = strlen(text);
+    if (result == FR_OK) {
+        result = file->write(text, size, &written);
+        if (result == FR_OK && written != size) result = FR_DISK_ERR;
+        if (result == FR_OK) result = file->sync();
+        FRESULT closed = fm->fclose(file); if (result == FR_OK) result = closed;
+    }
+    delete[] text;
+    if (result != FR_OK) return result;
+    mstring original(CFG_FILEPATH "/" FTP_SERVERS), backup(CFG_FILEPATH "/ftp_servers.bak");
+    result = fm->delete_file(backup.c_str());
+    if (result != FR_OK && result != FR_NO_FILE) return result;
+    result = fm->rename(original.c_str(), backup.c_str());
+    bool existed = result == FR_OK;
+    if (result != FR_OK && result != FR_NO_FILE) return result;
+    result = fm->rename(CFG_FILEPATH "/ftp_servers.tmp", original.c_str());
+    if (result != FR_OK && existed) fm->rename(backup.c_str(), original.c_str());
+    return result;
 }
 
 void FTPRootNode :: load_servers_impl(File *f)
@@ -543,12 +297,13 @@ void FTPRootNode :: load_servers_impl(File *f)
     char *buffer = new char[size+1];
 
     uint32_t transferred;
-    f->read(buffer, size, &transferred);
+    if (f->read(buffer, size, &transferred) != FR_OK || transferred != size) { delete[] buffer; return; }
     buffer[transferred] = 0;
+    if (!server_editor_input_supported(buffer, transferred)) { delete[] buffer; return; }
 
     JSON *root_json = NULL;
     int tokens = convert_text_to_json_objects(buffer, transferred, 1024, &root_json);
-    if ((tokens > 0) && root_json && (root_json->type() == eObject)) {
+    if ((tokens > 0) && root_json && (root_json->type() == eObject) && server_editor_decode_tree(root_json)) {
         JSON *servers_json = ((JSON_Object *)root_json)->get("servers");
         if (servers_json && (servers_json->type() == eList)) {
             JSON_List *servers = (JSON_List *)servers_json;
@@ -566,12 +321,15 @@ void FTPRootNode :: load_servers_impl(File *f)
                 }
 
                 int port = entry->int_or("port", 21);
+                if (port < 1 || port > 65535 || !server_editor_host_valid(host) || strpbrk(alias, "/*?\\:\r\n")) continue;
                 char portstr[8];
                 sprintf(portstr, "%d", port);
 
                 const char *user = entry->string_or("user", "anonymous");
                 const char *encoded_password = entry->string_or("password", "");
                 const char *folder = entry->string_or("folder", "/");
+                if (folder[0] != '/' || strchr(folder, '\r') || strchr(folder, '\n') ||
+                    strchr(user, '\r') || strchr(user, '\n')) continue;
                 char *password = new char[1 + strlen(encoded_password)];
                 strcpy(password, encoded_password);
                 url_decode(password, password, 0);
@@ -597,117 +355,144 @@ IndexedList<Browsable *> *BrowsableFTPRoot :: getSubItems(int &error)
     return &children;
 }
 
-SubsysResultCode_e BrowsableFTPRoot :: S_new_host(SubsysCommand *cmd)
-{ 
-    UserInterface *cmd_ui = cmd->user_interface;
-
-    FormUI *form = new FormUI(cmd_ui, 38, 12, "Enter New Server", (JSON_Object *)cmd->direct_obj);
-    form->init(cmd_ui->screen, cmd_ui->keyboard);
-
-    do {
-        int ret = cmd_ui->uiobject_modal(form);
-
-        if (ret == MENU_DONE) {
-            JSON_Object *obj = (JSON_Object *)cmd->direct_obj;
-            printf("Result: %d %s\n", ret, obj->render());
-            JSON_String *alias = (JSON_String *)obj->get("Alias");
-            JSON_String *host  = (JSON_String *)obj->get("Host");
-            JSON_String *port  = (JSON_String *)obj->get("Port");
-            JSON_String *user  = (JSON_String *)obj->get("User");
-            JSON_String *passw = (JSON_String *)obj->get("Password");
-            JSON_String *folder= (JSON_String *)obj->get("Path");
-            if (!alias || (alias->get_string()[0] == 0)) {
-                cmd_ui->popup("Alias cannot be empty", BUTTON_OK);
-                continue;
-            }
-            if (!host || (host->get_string()[0] == 0)) {
-                cmd_ui->popup("Hostname cannot be empty", BUTTON_OK);
-                continue;
-            }
-
-            // OK!
-            FTPServer *new_server = new FTPServer(ftp_root, alias->get_string(), host->get_string(), port->get_string(),
-                                                    user->get_string(), passw->get_string(), folder->get_string());
-            ftp_root->children.append(new_server);
-            ftp_root->save_servers();
-            // FileManager :: getFileManager() -> sendEventToObservers(eRefreshDirectory, "/ftp", "");
-            break;
-        } else { // some other code
-            break;
-        } 
-    } while(1);
-    // Cleanup
-    form->deinit();
-    delete form;
-    return SSRET_OK;
+static bool ftp_settings_valid(UserInterface *ui, JSON_Object *fields, FTPServer *except = NULL)
+{
+    const char *alias = fields->string_or("Alias", "");
+    const char *host = fields->string_or("Host", "");
+    const char *port = fields->string_or("Port", "");
+    const char *path = fields->string_or("Path", "");
+    bool valid = *alias && strlen(alias) <= 63 && !strpbrk(alias, "/*?\\:\r\n") &&
+        server_editor_host_valid(host) && server_editor_port(port) > 0 &&
+        path[0] == '/' && !strchr(path, '\r') && !strchr(path, '\n');
+    for (const char *p = alias; *p; ++p) if ((unsigned char)*p < 32 || (unsigned char)*p >= 127) valid = false;
+    const char *user = fields->string_or("User", ""); const char *pass = fields->string_or("Password", "");
+    if (!*user || strchr(user, '\r') || strchr(user, '\n') || strchr(pass, '\r') || strchr(pass, '\n')) valid = false;
+    for (int i = 0; i < ftp_root->children.get_elements(); ++i) {
+        FTPServer *s = (FTPServer *)ftp_root->children[i];
+        if (s != except && !strcasecmp(s->alias.c_str(), alias)) valid = false;
+    }
+    if (!valid) ui->popup("Check FTP settings.\nUnique alias; DNS/IPv4 host;\nport 1-65535; path starts /.\nPlain FTP only (not SFTP/FTPS).", BUTTON_OK);
+    return valid;
+}
+static void ftp_save_result(UserInterface *ui)
+{
+    if (ftp_root->save_servers() != FR_OK)
+        ui->popup("FTP settings active but NOT saved.\nCheck Flash space / permissions.\nPrevious file or .bak retained.", BUTTON_OK);
+}
+static void ftp_progress(void *context, const char *stage, uint32_t bytes)
+{
+    char message[80]; snprintf(message, sizeof(message), "%s: %u bytes", stage, (unsigned)bytes);
+    ((UserInterface *)context)->update_progress(message, 0);
+}
+static bool ftp_test_line(void *, const char *line, bool machine) {
+    char name[512]; uint32_t size; bool dir;
+    return ftp_entry(line, machine, name, sizeof(name), &size, &dir);
+}
+SubsysResultCode_e BrowsableFTPServer::S_connection(SubsysCommand *cmd)
+{
+    UserInterface *ui = cmd->user_interface; if (!ui) return SSRET_NO_USER_INTERFACE;
+    BrowsableFTPServer *bs = (BrowsableFTPServer *)cmd->direct_obj;
+    FTPServer *server = (FTPServer *)ftp_root->find_child(bs->getName());
+    if (!server) return SSRET_INTERNAL_ERROR;
+    FileSystemFTP *fs = (FileSystemFTP *)server->get_file_info()->fs;
+    if (!fs) return SSRET_INTERNAL_ERROR;
+    if (cmd->functionID == 2 || cmd->functionID == 4) {
+        if (cmd->functionID == 2) fs->drop_connection();
+        mstring refresh_path;
+        char full_path[128]; snprintf(full_path, sizeof(full_path), "/ftp/%s", server->alias.c_str());
+        FileManager::getFileManager()->sendEventToObservers(eRefreshDirectory, full_path, "");
+        FileManager::getFileManager()->sendEventToObservers(eRefreshDirectory, "/ftp", "");
+        ui->popup(cmd->functionID == 2 ? "FTP disconnected.\nEnter or Reconnect to connect." : "Directory refresh requested.\nRe-enter the server to reload.", BUTTON_OK);
+        return SSRET_OK;
+    }
+    FTPClient *client = fs->get_client();
+    if (cmd->functionID == 3) {
+        char message[256];
+        snprintf(message, sizeof(message), "%s:%u\n%s\nBytes: %u\n%s", server->host.c_str(), server->port,
+            client ? client->last_stage() : "Not connected", client ? (unsigned)client->bytes_transferred() : 0,
+            client && client->last_error()[0] ? client->last_error() : "No recorded error");
+        ui->popup(message, BUTTON_OK); return SSRET_OK;
+    }
+    // Test always establishes a fresh control/login/data sequence.
+    fs->drop_connection(); ui->show_progress("Testing FTP...", 1);
+    // connect_if_needed creates and owns the client. Attach observer before open.
+    if (client) client->set_progress(ftp_progress, ui);
+    int result = fs->connect_if_needed();
+    if (!result) result = client->list_lines(server->folder.c_str(), ftp_test_line, NULL);
+    char message[256];
+    if (!result) snprintf(message, sizeof(message), "FTP test passed.\n%s:%u\nLogin and directory data OK.\nListing: %u bytes.", server->host.c_str(), server->port, (unsigned)client->bytes_transferred());
+    else snprintf(message, sizeof(message), "FTP test failed.\n%s:%u\n%s", server->host.c_str(), server->port, client ? client->last_error() : "No client available");
+    if (client) client->set_progress(NULL, NULL);
+    ui->hide_progress(); ui->popup(message, BUTTON_OK); return SSRET_OK;
 }
 
-SubsysResultCode_e BrowsableFTPServer :: S_edit(SubsysCommand *cmd)
-{ 
-    UserInterface *cmd_ui = cmd->user_interface;
-    BrowsableFTPServer *bs = (BrowsableFTPServer *)cmd->direct_obj;
-
-    FTPServer *serv = (FTPServer *)ftp_root->find_child(bs->getName());
-    if (!serv) {
-        return SSRET_INTERNAL_ERROR;
+static bool ftp_edit_settings(UserInterface *ui, JSON_Object *fields, FTPServer *except)
+{
+    const char *keys[] = {"Alias", "Host", "Port", "User", "Password", "Path"};
+    const char *prompts[] = {"Server name", "Host (DNS / IPv4, no ftp://)", "Port (usually 21)", "User (anonymous if public)", "New password (blank clears)", "Starting directory (usually /)"};
+    for (;;) {
+        char labels[8][72]; const char *choices[8];
+        for (int i = 0; i < 6; ++i) {
+            const char *value = fields->string_or(keys[i], "");
+            // The firmware formatter has no printf string-precision support.
+            char preview[49];
+            const char *display = i == 4 ? (*value ? "[set]" : "[empty]") : value;
+            strncpy(preview, display, sizeof(preview)-1);
+            preview[sizeof(preview)-1] = 0;
+            snprintf(labels[i], sizeof(labels[i]), "%s: %s", keys[i], preview);
+            choices[i] = labels[i];
+        }
+        choices[6] = "Save server"; choices[7] = "Cancel";
+        int selected = ui->choice("FTP server (plain FTP)", choices, 8);
+        if (selected < 0 || selected == 7) return false;
+        if (selected == 6) { if (ftp_settings_valid(ui, fields, except)) return true; continue; }
+        char buffer[256];
+        const char *old = fields->string_or(keys[selected], "");
+        if (strlen(old) > 255) { ui->popup("Field too long for editor.", BUTTON_OK); continue; }
+        strcpy(buffer, selected == 4 ? "" : old);
+        int limit = selected == 2 ? 5 : selected == 0 ? 63 : 255;
+        if (ui->string_box(prompts[selected], buffer, limit) >= 0) fields->set(keys[selected], buffer);
     }
-
-    JSON_Object *fields = JSON::Obj();
-    char portstr[8];
-    sprintf(portstr, "%d", serv->port);
-    fields  ->add("Alias", serv->alias.c_str())
-            ->add("Host",  serv->host.c_str())
-            ->add("Port",  portstr)
-            ->add("User",  serv->user.c_str())
-            ->add("Password", serv->passw.c_str())
-            ->add("Path", serv->folder.c_str());
-
-    FormUI *form = new FormUI(cmd_ui, 38, 12, "Edit FTP Server", fields);
-    form->init(cmd_ui->screen, cmd_ui->keyboard);
-
-    do {
-        int ret = cmd_ui->uiobject_modal(form);
-
-        if (ret == MENU_DONE) {
-            JSON_String *alias = (JSON_String *)fields->get("Alias");
-            JSON_String *host  = (JSON_String *)fields->get("Host");
-            JSON_String *port  = (JSON_String *)fields->get("Port");
-            JSON_String *user  = (JSON_String *)fields->get("User");
-            JSON_String *passw = (JSON_String *)fields->get("Password");
-            JSON_String *folder= (JSON_String *)fields->get("Path");
-            if (!alias || (alias->get_string()[0] == 0)) {
-                cmd_ui->popup("Alias cannot be empty", BUTTON_OK);
-                continue;
-            }
-            if (!host || (host->get_string()[0] == 0)) {
-                cmd_ui->popup("Hostname cannot be empty", BUTTON_OK);
-                continue;
-            }
-
-            // OK!
-            FileManager :: getFileManager()->invalidate(serv);
-            serv->drop_connection();
-
-            serv->alias  = alias->get_string();
-            serv->host   = host->get_string();
-            serv->port   = strtol(port->get_string(), NULL, 10);
-            serv->user   = user->get_string();
-            serv->passw  = passw->get_string();
-            serv->folder = folder->get_string();
-            if (!serv->port) {
-                serv->port = 21;
-            }
-            ftp_root->save_servers();
-            FileManager :: getFileManager() -> sendEventToObservers(eRefreshDirectory, "/ftp", "");
-            break;
-        } else { // some other code
-            break;
-        } 
-    } while(1);
-    // Cleanup
-    form->deinit();
-    delete form;
-    return SSRET_OK;
+}
+SubsysResultCode_e BrowsableFTPRoot::S_new_host(SubsysCommand *cmd)
+{
+    UserInterface *ui = cmd->user_interface;
+    if (!ui) return SSRET_NO_USER_INTERFACE;
+    JSON_Object *fields = JSON::Obj()->add("Alias", "")->add("Host", "")->add("Port", "21")
+        ->add("User", "anonymous")->add("Password", "")->add("Path", "/");
+    if (ftp_edit_settings(ui, fields, NULL)) {
+        FTPServer *server = new FTPServer(ftp_root, fields->string_or("Alias", ""), fields->string_or("Host", ""),
+            fields->string_or("Port", "21"), fields->string_or("User", "anonymous"),
+            fields->string_or("Password", ""), fields->string_or("Path", "/"));
+        ftp_root->children.append(server);
+        ftp_save_result(ui);
+        FileManager::getFileManager()->sendEventToObservers(eRefreshDirectory, "/ftp", "");
+    }
+    delete fields; return SSRET_OK;
+}
+SubsysResultCode_e BrowsableFTPServer::S_edit(SubsysCommand *cmd)
+{
+    UserInterface *ui = cmd->user_interface;
+    if (!ui) return SSRET_NO_USER_INTERFACE;
+    BrowsableFTPServer *bs = (BrowsableFTPServer *)cmd->direct_obj;
+    FTPServer *server = (FTPServer *)ftp_root->find_child(bs->getName());
+    if (!server) return SSRET_INTERNAL_ERROR;
+    char port[8]; snprintf(port, sizeof(port), "%u", server->port);
+    JSON_Object *fields = JSON::Obj()->add("Alias", server->alias.c_str())->add("Host", server->host.c_str())
+        ->add("Port", port)->add("User", server->user.c_str())->add("Password", server->passw.c_str())->add("Path", server->folder.c_str());
+    if (ftp_edit_settings(ui, fields, server)) {
+        FileManager::getFileManager()->invalidate(server); server->drop_connection();
+        server->alias = fields->string_or("Alias", ""); server->host = fields->string_or("Host", "");
+        server->port = server_editor_port(fields->string_or("Port", "21")); server->user = fields->string_or("User", "");
+        server->passw = fields->string_or("Password", ""); server->folder = fields->string_or("Path", "/");
+        // Keep the cached node name and its displayed alias consistent.
+        FileInfo *info = server->get_file_info();
+        delete[] info->lfname; info->lfsize = server->alias.length() + 1;
+        info->lfname = new char[info->lfsize]; strcpy(info->lfname, server->alias.c_str());
+        ftp_save_result(ui);
+        FileManager::getFileManager()->sendEventToObservers(eRefreshDirectory, "/ftp", "");
+    }
+    delete fields; return SSRET_OK;
 }
 
 SubsysResultCode_e BrowsableFTPServer :: S_remove(SubsysCommand *cmd)
@@ -719,6 +504,7 @@ SubsysResultCode_e BrowsableFTPServer :: S_remove(SubsysCommand *cmd)
     if (!serv) {
         return SSRET_INTERNAL_ERROR;
     }
+    if (cmd_ui->popup("Remove this FTP server?", BUTTON_OK | BUTTON_CANCEL) != BUTTON_OK) return SSRET_ABORTED_BY_USER;
     FileManager :: getFileManager()->invalidate(serv);
     // Close the live FTP control connection before dropping the node. Without
     // this, removing a server that had been entered leaks its open control
@@ -733,7 +519,7 @@ SubsysResultCode_e BrowsableFTPServer :: S_remove(SubsysCommand *cmd)
     serv->get_file_info()->fs = NULL;
     delete fs;
     delete serv;
-    ftp_root->save_servers();
+    ftp_save_result(cmd_ui);
     FileManager :: getFileManager() -> sendEventToObservers(eRefreshDirectory, "/ftp", "");
     return SSRET_OK;
 }

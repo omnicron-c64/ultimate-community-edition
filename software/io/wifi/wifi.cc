@@ -31,6 +31,12 @@ WiFi :: WiFi()
 {
     runModeTask = NULL;
     state = eWifi_Off;
+    lastDisconnectReason = 0;
+    connectionFeedback.finish();
+    scanReturnState = eWifi_NotConnected;
+    scanAttempted = false;
+    scanResult = 0;
+    last_ap[0] = 0;
     bzero(my_mac, 6);
     wifi_aps.num_records  = 0;
     my_ip = 0;
@@ -112,6 +118,12 @@ void WiFi :: Terminate()
     netstack->stop(); // remove from list with available network stacks
     uart->ResetReceiveCallback();
     state = eWifi_Off;
+    lastDisconnectReason = 0;
+    connectionFeedback.finish();
+    scanReturnState = eWifi_NotConnected;
+    scanAttempted = false;
+    scanResult = 0;
+    last_ap[0] = 0;
     RefreshRoot();
 }
 
@@ -285,9 +297,9 @@ void WiFi :: RunModeThread()
             break;
 
         case eWifi_Scanning:
-            wifi_aps.num_records = 0;
-            wifi_scan(&wifi_aps);
-            state = eWifi_NotConnected;
+            scanResult = wifi_scan(&wifi_aps);
+            scanAttempted = true;
+            state = scanReturnState;
             RefreshRoot();
             RefreshAPs();
             break;
@@ -303,7 +315,8 @@ void WiFi :: RunModeThread()
             switch(hdr->command) {
             case EVENT_RESCAN: // requested from user interface
                 uart->FreeBuffer(buf);
-                netstack->link_down();
+                // A scan does not disconnect the radio: preserve the host link/DHCP lease.
+                scanReturnState = state;
                 state = eWifi_Scanning;
                 RefreshRoot();
                 break;
@@ -317,7 +330,12 @@ void WiFi :: RunModeThread()
 
             case EVENT_CONNECTED:
                 ev2 = (event_pkt_connected *)buf->data;
+                if (buf->size < sizeof(event_pkt_connected)) {
+                    uart->FreeBuffer(buf);
+                    break;
+                }
                 memcpy(last_ap, ev2->ssid, 32);
+                last_ap[32] = 0;
                 uart->FreeBuffer(buf);
                 if (state == eWifi_Connected) { // already connected!
                     netstack->link_down();
@@ -326,11 +344,14 @@ void WiFi :: RunModeThread()
                 state = eWifi_Connected;
                 uart->txDebug = false;
                 netstack->link_up();
+                connectionFeedback.connected(last_ap);
 
                 RefreshRoot();
                 break;
 
             case EVENT_DISCONNECTED:
+                lastDisconnectReason = wifi_disconnect_reason(buf->data, buf->size);
+                connectionFeedback.disconnected(lastDisconnectReason);
                 uart->FreeBuffer(buf);
                 state = eWifi_NotConnected;
                 if(netstack) {
@@ -411,9 +432,15 @@ void WiFi :: freeBuffer(command_buf_t *buf)
 int WiFi ::getAccessPointItems(Browsable *parent, IndexedList<Browsable *> &list)
 {
     ultimate_ap_records_t *aps = &wifi_aps;
-    if (aps->num_records == 0) {
-        list.append(new BrowsableStatic("Scanning..."));
-        return 0;
+    if (aps->num_records == 0 || aps->num_records > DEFAULT_SCAN_LIST_SIZE) {
+        const char *message = "Scanning...";
+        if (state != eWifi_Scanning && scanAttempted)
+            message = scanResult ? "Scan failed; use Rescan" : "No networks; use Rescan";
+        list.append(new BrowsableStatic(message));
+        // Only the initial browse requests a scan; failures must not loop forever.
+        bool request = !scanAttempted && state != eWifi_Scanning;
+        scanAttempted = true;
+        return request ? 0 : 1;
     }
     ENTER_SAFE_SECTION;
     for (int i = 0; i < aps->num_records; i++) {
@@ -431,29 +458,26 @@ void BrowsableWifiAP :: fetch_context_items(IndexedList<Action *>&items)
 
 SubsysResultCode_e BrowsableWifiAP :: connect_ap(SubsysCommand *cmd)
 {
-    char password[64] = { 0 };
+    char password[65] = { 0 }; // string_box takes 64 characters plus the terminator
     BrowsableWifiAP *bap = (BrowsableWifiAP *)cmd->functionID;
     if (bap->auth) {
-        if(cmd->user_interface) {
-            cmd->user_interface->string_box("Enter password", password, 64);
-        }
+        if (!cmd->user_interface) return SSRET_NO_USER_INTERFACE;
+        if (cmd->user_interface->string_box("Enter password", password, 64) < 0)
+            return SSRET_ABORTED_BY_USER;
     }
-    int result = wifi_wifi_connect(bap->ssid, password, bap->auth);
-    printf("Connect result: %d\n", result);
-    if (result == 0) {
-        //wifi.sendEvent(EVENT_CONNECTED);
-        wifi.sendConnectEvent(bap->ssid, password, bap->auth);
-    }
+    wifi.connectWithFeedback(cmd->user_interface, bap->ssid, password, bap->auth);
+    // Only the module's real EVENT_CONNECTED may bring up the host link.
+    // The RPC result means request accepted, not association/password success.
     return SSRET_OK;
 }
 
 err_t wifi_tx_packet(void *driver, void *buffer, int length)
 {
-    if (wifi.getState() != eWifi_Connected) {
+    if (!wifi.canTransmit()) {
         return ERR_CONN;
     }
     
-    BUFARGS(send_eth, CMD_SEND_PACKET);
+    BUFARGS_NOREPLY(send_eth, CMD_SEND_PACKET, ERR_MEM); // the module does not answer frames
 
     uint32_t chunkSize = length;
     if (chunkSize > CMD_BUF_PAYLOAD) {
@@ -482,4 +506,72 @@ extern "C" {
     {
         wifi.PrintUartStatus();
     }
+}
+int WiFi :: connectWithFeedback(UserInterface *ui, const char *ssid, const char *password, uint8_t auth, int savedSlot)
+{
+    if (!ui) return wifi_wifi_connect(ssid, password, auth);
+    ENTER_SAFE_SECTION;
+    connectionFeedback.begin(ssid);
+    LEAVE_SAFE_SECTION;
+    ui->show_progress("Connecting to WiFi...", 1);
+    int result;
+#if U64 == 1
+    if (savedSlot >= 0) {
+        wifi_saved_record r = {};
+        r.slot = savedSlot; strncpy(r.ssid, ssid, 32);
+        result = wifi_saved_action(CMD_WIFI_SAVED_CONNECT, &r);
+    } else
+#endif
+    result = wifi_wifi_connect(ssid, password, auth);
+    char message[128];
+    if (result != 0) {
+        sprintf(message, "%s\nError: %d", wifi_connection_request_failure(result), result);
+    } else {
+        // Give association and host DHCP separate bounded waits. The UI task
+        // yields; module events and the network stack keep running normally.
+        int association_wait = 0, address_wait = 0;
+        bool showed_ip = false;
+        for (;;) {
+            WifiConnectionFeedback::Phase phase = connectionFeedback.phase;
+            if (phase == WifiConnectionFeedback::Failed) {
+                sprintf(message, "%s\nReason: %d", wifi_connection_failure(connectionFeedback.reason), (int)connectionFeedback.reason);
+                result = -1;
+                break;
+            }
+            if (phase == WifiConnectionFeedback::WaitingForIP) {
+                if (!showed_ip) {
+                    ui->update_progress("WiFi up; waiting for IP...", 0);
+                    showed_ip = true;
+                }
+                if (state == eWifi_Connected && netstack && netstack->hasUsableAddress()) {
+                    char ip[16];
+                    char display[33];
+                    for (int i = 0; i < 32; ++i) {
+                        unsigned char c = connectionFeedback.target[i];
+                        display[i] = (c && (c < 32 || c >= 127)) ? '?' : c;
+                    }
+                    display[32] = 0;
+                    sprintf(message, "Connected to:\n%s\nIP: %s", display, netstack->getIpAddrString(ip, sizeof(ip)));
+                    result = 0;
+                    break;
+                }
+                if (++address_wait > 300) {
+                    strcpy(message, "WiFi connected, but no IP yet.\nCheck DHCP / network settings.");
+                    result = -1;
+                    break;
+                }
+            } else if (++association_wait > 300) {
+                strcpy(message, "Connection timed out.\nCheck AP, password and signal.\nConnection may still complete.");
+                result = -1;
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+    ENTER_SAFE_SECTION;
+    connectionFeedback.finish();
+    LEAVE_SAFE_SECTION;
+    ui->hide_progress();
+    ui->popup(message, BUTTON_OK);
+    return result;
 }

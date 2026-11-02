@@ -251,7 +251,7 @@ public:
 	bool is_temp_auto_cleanup_enabled(void) { return temp_auto_cleanup_enabled; }
 	bool is_temp_use_cache_subfolder_enabled(void) { return temp_use_cache_subfolder_enabled; }
 
-    void 	fclose(File *f);
+    FRESULT fclose(File *f);
     FRESULT fcopy(const char *path, const char *filename, const char *dest, const char *dest_filename, bool overwrite);
 
     FRESULT rename(Path *old_path, const char *old_name, Path *new_path, const char *new_name);

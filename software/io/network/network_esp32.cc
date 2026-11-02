@@ -13,6 +13,8 @@
 #include "subsys.h"
 #include "userinterface.h"
 #include "tree_browser.h"
+#include "lwip/dhcp.h"
+#include "lwip/dns.h"
 // Concept:
 // 1) Take buffer from cmd buffer free queue (may block)
 // 2) Fill buffer with command and task and sequence code
@@ -32,6 +34,10 @@ const char *authmodes[] = { "Open", "WEP", "WPA PSK", "WPA2 PSK", "WPA/WPA2 PSK"
 
 //-----------------------------------
 struct t_cfg_definition wifi_config[] = {
+#if U64 == 1
+    { CFG_WIFI_PANEL, CFG_TYPE_FUNC, "WiFi status / reconnect", "", (const char **)NetworkLWIP_WiFi::cfg_status_screen, 0, 0, 0 },
+    { CFG_WIFI_SAVED, CFG_TYPE_FUNC, "Saved access points", "", (const char **)NetworkLWIP_WiFi::cfg_saved_aps, 0, 0, 0 },
+#endif
 #if U64 == 2
     { CFG_WIFI_ENA,    CFG_TYPE_FUNC,   "Enable",                        "",(const char **)NetworkLWIP_WiFi :: cfg_enable, 0, 0, 0 },
     { CFG_WIFI_DIS,    CFG_TYPE_FUNC,   "Disable",                       "",(const char **)NetworkLWIP_WiFi :: cfg_disable, 0, 0, 0 },
@@ -210,6 +216,9 @@ void NetworkLWIP_WiFi :: on_edit()
 
 void NetworkLWIP_WiFi :: fetch_context_items(IndexedList<Action *>&items)
 {
+#if U64 == 1
+    items.append(new Action("WiFi status / reconnect", status_screen, 0, 0));
+#endif
     if (wifi.getState() == eWifi_Connected) {
         items.append(new Action("Forget APs", NetworkLWIP_WiFi :: clear_aps, 0, 0));
         items.append(new Action("Disconnect", NetworkLWIP_WiFi :: disconnect, 0, 0));
@@ -252,7 +261,12 @@ SubsysResultCode_e NetworkLWIP_WiFi :: clear_aps(SubsysCommand *cmd)
 
 SubsysResultCode_e NetworkLWIP_WiFi :: auto_connect(SubsysCommand *cmd)
 {
+#if U64 == 1
+    if (!cmd->user_interface) return SSRET_NO_USER_INTERFACE;
+    reconnect(cmd->user_interface);
+#else
     wifi_wifi_autoconnect();
+#endif
     return SSRET_OK;
 }
 
@@ -262,7 +276,7 @@ SubsysResultCode_e NetworkLWIP_WiFi :: manual_connect(SubsysCommand *cmd)
         return SSRET_NO_USER_INTERFACE;
     
     char ssid[36];
-    char password[64];
+    char password[65];
     int authmode = 0;
     int ret;
     ssid[0] = 0;
@@ -278,12 +292,12 @@ SubsysResultCode_e NetworkLWIP_WiFi :: manual_connect(SubsysCommand *cmd)
         return SSRET_ABORTED_BY_USER;
     }
     if (authmode > 0) { // for anything except "Open", ask for password
-        ret = cmd->user_interface->string_box("Password", password, 62);
+        ret = cmd->user_interface->string_box("Password", password, 64);
         if (ret < 0) { // allow empty string (ret == 1)
             return SSRET_ABORTED_BY_USER;
         }
     }
-    wifi_wifi_connect(ssid, password, authmode);
+    wifi.connectWithFeedback(cmd->user_interface, ssid, password, authmode);
     return SSRET_OK;
 }
 
@@ -325,7 +339,11 @@ void NetworkLWIP_WiFi :: cfg_conn_last(UserInterface *intf, ConfigItem *it)
         intf->popup("Can only connect when active", BUTTON_OK);
         return;
     }
-    wifi_wifi_autoconnect();    
+#if U64 == 1
+    reconnect(intf);
+#else
+    wifi_wifi_autoconnect();
+#endif
 }
 
 void NetworkLWIP_WiFi :: cfg_disconn(UserInterface *intf, ConfigItem *it)
@@ -350,7 +368,8 @@ void NetworkLWIP_WiFi :: cfg_disable(UserInterface *intf, ConfigItem *it)
 
 void NetworkLWIP_WiFi :: cfg_forget(UserInterface *intf, ConfigItem *it)
 {
-    wifi_forget_aps();
+    SubsysCommand cmd(intf, 0, 0, 0, "", "");
+    clear_aps(&cmd);
 }
 
 SubsysResultCode_e NetworkLWIP_WiFi :: list_aps(SubsysCommand *cmd)
@@ -397,3 +416,128 @@ IndexedList<Browsable *> *BrowsableWifiAPList :: getSubItems(int &error)
     return &children;
 }
 
+
+// Do not report an old cached DHCP address as a newly acquired lease.
+bool NetworkLWIP_WiFi :: hasUsableAddress()
+{
+    return if_up && !ip_addr_isany(&my_net_if.ip_addr) &&
+        (!dhcp_enable || dhcp_supplied_address(&my_net_if));
+}
+
+#if U64 == 1
+// SSIDs are untrusted display text; strip terminal/menu control bytes.
+static void wifi_display_name(char *out, const char *ssid)
+{
+    for (int i = 0; i < 32; ++i) {
+        unsigned char c = ssid[i];
+        out[i] = c && (c < 32 || c >= 127) ? '?' : c;
+        if (!c) return;
+    }
+    out[32] = 0;
+}
+static bool wifi_load_saved(UserInterface *ui, wifi_saved_record *records, unsigned *count)
+{
+    if (wifi.getState() != eWifi_Connected && wifi.getState() != eWifi_NotConnected) {
+        ui->popup("WiFi is disabled or busy.\nEnable WiFi and retry when idle.", BUTTON_OK); return false;
+    }
+    ui->show_progress("Reading saved APs...", 1);
+    int err = wifi_saved_list(records, count);
+    ui->hide_progress();
+    if (err) {
+        ui->popup("Cannot read saved APs.\nCheck module firmware V1.9\nand retry when WiFi is idle.", BUTTON_OK);
+        return false;
+    }
+    return true;
+}
+void NetworkLWIP_WiFi::reconnect(UserInterface *ui)
+{
+    wifi_saved_record records[WIFI_SAVED_MAX]; unsigned count;
+    if (!wifi_load_saved(ui, records, &count)) return;
+    if (!count) { ui->popup("No saved APs.\nScan or enter an AP first.", BUTTON_OK); return; }
+    unsigned selected = 0;
+    for (unsigned i = 0; i < count; ++i) if (records[i].preferred) selected = i;
+    wifi_saved_record &r = records[selected];
+    wifi.connectWithFeedback(ui, r.ssid, "", r.auth, r.slot);
+}
+void NetworkLWIP_WiFi::saved_aps(UserInterface *ui)
+{
+    for (;;) {
+        wifi_saved_record records[WIFI_SAVED_MAX]; unsigned count;
+        if (!wifi_load_saved(ui, records, &count)) return;
+        if (!count) { ui->popup("No saved access points.", BUTTON_OK); return; }
+        char names[WIFI_SAVED_MAX][36]; const char *choices[WIFI_SAVED_MAX];
+        for (unsigned i = 0; i < count; ++i) {
+            names[i][0] = records[i].preferred ? '*' : ' ';
+            names[i][1] = ' ';
+            wifi_display_name(names[i] + 2, records[i].ssid);
+            choices[i] = names[i];
+        }
+        int selected = ui->choice("Saved APs (* last successful)", choices, count);
+        if (selected < 0) return;
+        const char *actions[] = {"Connect", "Forget this AP", "Back"};
+        int action = ui->choice(names[selected], actions, 3);
+        wifi_saved_record &record = records[selected];
+        if (action == 0) wifi.connectWithFeedback(ui, record.ssid, "", record.auth, record.slot);
+        else if (action == 1 && ui->popup("Forget this saved AP?\nCurrent link is kept until\ndisconnected. Password is erased.", BUTTON_OK | BUTTON_CANCEL) == BUTTON_OK) {
+            int err = wifi_saved_action(CMD_WIFI_SAVED_FORGET, &record);
+            ui->popup(err ? "Could not forget AP.\nRefresh list and retry." : "Saved AP forgotten.", BUTTON_OK);
+        }
+    }
+}
+void NetworkLWIP_WiFi::show_details(UserInterface *ui)
+{
+    char ssid[33], ip[16], gateway[16], mask[16], dns[16], dns2[16], message[320];
+    wifi_display_name(ssid, wifi.getLastAP());
+    strncpy(ip, hasUsableAddress() ? ipaddr_ntoa(&my_net_if.ip_addr) : "not ready", sizeof(ip));
+    strncpy(gateway, ipaddr_ntoa(&my_net_if.gw), sizeof(gateway));
+    strncpy(mask, ipaddr_ntoa(&my_net_if.netmask), sizeof(mask));
+    // lwIP stores DHCP-supplied DNS in its global resolver table, not my_dns.
+    // Snapshot both addresses without a task switch on this single-core host;
+    // format after leaving the critical section. This does not change DNS policy.
+    ip_addr_t primary_dns, secondary_dns;
+    ENTER_SAFE_SECTION;
+    primary_dns = *dns_getserver(0);
+    secondary_dns = *dns_getserver(1);
+    LEAVE_SAFE_SECTION;
+    if (ip_addr_isany(&primary_dns)) strcpy(dns, "not set");
+    else ipaddr_ntoa_r(&primary_dns, dns, sizeof(dns));
+    if (ip_addr_isany(&secondary_dns)) strcpy(dns2, "not set");
+    else ipaddr_ntoa_r(&secondary_dns, dns2, sizeof(dns2));
+    const char *link = wifi.canTransmit() ? "Associated" : "Not associated";
+    snprintf(message, sizeof(message), "%s\nAP: %s\n%s IP: %s\nGateway: %s\nNetmask: %s\nActive DNS 1: %s\nActive DNS 2: %s\nLast disconnect reason: %u\n%s", link, ssid,
+        dhcp_enable ? "DHCP" : "Static", ip, gateway, mask, dns, dns2,
+        wifi.getDisconnectReason(), wifi.getModuleName());
+    ui->popup(message, BUTTON_OK);
+}
+SubsysResultCode_e NetworkLWIP_WiFi::status_screen(SubsysCommand *cmd)
+{
+    UserInterface *ui = cmd->user_interface;
+    if (!ui) return SSRET_NO_USER_INTERFACE;
+    NetworkLWIP_WiFi *net = NULL;
+    for (int i = 0; i < NetworkInterface::getNumberOfInterfaces(); ++i) {
+        NetworkInterface *candidate = NetworkInterface::getInterface(i);
+        if (candidate->is_wireless()) { net = (NetworkLWIP_WiFi *)candidate; break; }
+    }
+    if (!net) return SSRET_GENERIC_ERROR;
+    const char *actions[] = {"Connection details / refresh", "Reconnect last saved AP", "Saved access points", "Scan / select AP", "Disconnect", "Back"};
+    for (;;) {
+        const char *title = net->hasUsableAddress() && wifi.canTransmit() ? "WiFi: IP ready" :
+            wifi.canTransmit() ? "WiFi: associated, no IP" : "WiFi: not connected";
+        int action = ui->choice(title, actions, 6);
+        if (action < 0 || action == 5) return SSRET_OK;
+        if (action == 0) net->show_details(ui);
+        else if (action == 1) reconnect(ui);
+        else if (action == 2) saved_aps(ui);
+        else if (action == 3) { cfg_show_aps(ui, NULL); return SSRET_OK; }
+        else if (action == 4) {
+            int err = wifi_wifi_disconnect();
+            ui->popup(err ? "Disconnect request failed." : "Disconnect requested.", BUTTON_OK);
+        }
+    }
+}
+void NetworkLWIP_WiFi::cfg_status_screen(UserInterface *ui, ConfigItem *)
+{
+    SubsysCommand cmd(ui, 0, 0, 0, "", ""); status_screen(&cmd);
+}
+void NetworkLWIP_WiFi::cfg_saved_aps(UserInterface *ui, ConfigItem *) { saved_aps(ui); }
+#endif

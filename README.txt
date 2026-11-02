@@ -1,4 +1,4 @@
-WELCOME TO THE OFFICIAL REPOSITORY FOR THE ULTIMATE-II, ULTIMATE-II+, ULTIMATE-II+L and U64 FIRMWARE
+UPSTREAM ULTIMATE BUILD NOTES — SEE README.md FOR ULTIMATE COMMUNITY EDITION
 ====================================================================================================
 
 Before you continue, be aware that this git repository uses some submodules. Make sure you also

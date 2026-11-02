@@ -7,6 +7,7 @@
 
 #include "user_file_interaction.h"
 #include "userinterface.h"
+#include "ftp_transfer_ui.h"
 #include "c1541.h"
 
 #include "c64.h"
@@ -300,17 +301,17 @@ SubsysResultCode_e UserFileInteraction::S_runApp(SubsysCommand *cmd)
 SubsysResultCode_e UserFileInteraction::S_copyTo(SubsysCommand *cmd)
 {
     mstring hmm;
-    int ret = pick_path(cmd->user_interface, hmm);
+    int ret = pick_path(cmd->user_interface, hmm, "Copy destination", "<< Copy into this folder >>");
     if (!ret) {
         return SSRET_ABORTED_BY_USER;
     }
 
     FileManager *fm = FileManager::getFileManager();
     char buffer[80];
-    FRESULT fres = fm->fcopy(cmd->path.c_str(), cmd->filename.c_str(), hmm.c_str(), cmd->filename.c_str(), false);
+    FRESULT fres = copy_with_ftp_progress(cmd->user_interface, fm, cmd->path.c_str(), cmd->filename.c_str(), hmm.c_str(), cmd->filename.c_str(), false);
     if (fres == FR_EXIST) {
         if (cmd->user_interface->popup("File exists. Overwrite?", BUTTON_YES | BUTTON_NO) == BUTTON_YES) {
-            fres = fm->fcopy(cmd->path.c_str(), cmd->filename.c_str(), hmm.c_str(), cmd->filename.c_str(), true);
+            fres = copy_with_ftp_progress(cmd->user_interface, fm, cmd->path.c_str(), cmd->filename.c_str(), hmm.c_str(), cmd->filename.c_str(), true);
         } else {
             return SSRET_OK;
         }
@@ -327,7 +328,7 @@ SubsysResultCode_e UserFileInteraction::S_copyTo(SubsysCommand *cmd)
 SubsysResultCode_e UserFileInteraction::S_moveTo(SubsysCommand *cmd)
 {
     mstring hmm;
-    int ret = pick_path(cmd->user_interface, hmm);
+    int ret = pick_path(cmd->user_interface, hmm, "Move destination", "<< Move into this folder >>");
     if (!ret) {
         return SSRET_ABORTED_BY_USER;
     }
@@ -344,10 +345,10 @@ SubsysResultCode_e UserFileInteraction::S_moveTo(SubsysCommand *cmd)
 
     if (fres == FR_INVALID_DRIVE) {
         // Cross-filesystem: copy + delete
-        fres = fm->fcopy(cmd->path.c_str(), cmd->filename.c_str(), hmm.c_str(), cmd->filename.c_str(), false);
+        fres = copy_with_ftp_progress(cmd->user_interface, fm, cmd->path.c_str(), cmd->filename.c_str(), hmm.c_str(), cmd->filename.c_str(), false);
         if (fres == FR_EXIST) {
             if (cmd->user_interface->popup("File exists. Overwrite?", BUTTON_YES | BUTTON_NO) == BUTTON_YES) {
-                fres = fm->fcopy(cmd->path.c_str(), cmd->filename.c_str(), hmm.c_str(), cmd->filename.c_str(), true);
+                fres = copy_with_ftp_progress(cmd->user_interface, fm, cmd->path.c_str(), cmd->filename.c_str(), hmm.c_str(), cmd->filename.c_str(), true);
             }
         }
         if (fres == FR_OK) {

@@ -2,6 +2,11 @@
 #include <string.h>
 #include <stdio.h>
 
+#if !defined(RUNS_ON_PC) && !defined(RECOVERYAPP)
+#include "c64.h"
+#include "subsys.h"
+#endif
+
 const char *test_text =
                   "Een editor is iemand die verantwoordelijk is voor de verwerking, bewerking en/of samenstelling "
                   "(montage) van beeld- en/of geluidsmateriaal tot een product dat geschikt is voor publicatie.\n\n"
@@ -229,7 +234,23 @@ int Editor :: handle_key(uint8_t c)
         case KEY_RETURN: // return
             ret = 1;
             break;
-            
+#if !defined(RUNS_ON_PC) && !defined(RECOVERYAPP)
+        case KEY_CTRL_X: // reset
+        {
+            SubsysCommand* cmd = new SubsysCommand(NULL, SUBSYSID_C64, MENU_C64_RESET, (int)0, "", "");
+            cmd->execute();
+            ret = -1;
+            break;
+        }
+        case KEY_CTRL_Z: // reboot
+        {
+            SubsysCommand* cmd = new SubsysCommand(NULL, SUBSYSID_C64, MENU_C64_REBOOT, (int)0, "", "");
+            cmd->execute();
+            ret = -1;
+            break;
+        }
+
+#endif
         default:
             printf("Unhandled context key: %b\n", c);
     }    

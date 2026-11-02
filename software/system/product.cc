@@ -130,14 +130,14 @@ char *getProductVersionString(char *buf, int sz, bool ascii) {
         case PRODUCT_ULTIMATE_II_PLUS_L:
             format = "%s %s (1%b)";
             fpga_version = getFpgaVersion();
-            sprintf(buf, format, getProductString(), appl_version, fpga_version);
+            snprintf(buf, sz, format, getProductString(), appl_version, fpga_version);
             break;
         case PRODUCT_ULTIMATE_64:
         case PRODUCT_ULTIMATE_64_ELITE:
         case PRODUCT_ULTIMATE_64_ELITE_II:
             format = "%s (V1.%b) %s";
             fpga_version = C64_CORE_VERSION;
-            sprintf(buf, format, getProductString(), fpga_version, appl_version);
+            snprintf(buf, sz, format, getProductString(), fpga_version, appl_version);
             break;
         default:
             strcpy(buf, "Unknown product");

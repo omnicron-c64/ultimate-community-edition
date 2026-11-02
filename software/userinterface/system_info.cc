@@ -205,3 +205,53 @@ void SystemInfo :: generate(UserInterface *ui)
     ui->run_editor(buffer.getText(), buffer.getLength());
 }
 
+
+
+#if U64 == 1 && !defined(RECOVERYAPP)
+#include "menu.h"
+#include "subsys.h"
+
+// Register with the existing task menu; the text viewer handles scrolling/back.
+// Remains available on demand rather than interrupting startup.
+class UceAboutMenu : public ObjectWithMenu {
+    static SubsysResultCode_e show(SubsysCommand *cmd) {
+        if (!cmd || !cmd->user_interface) return SSRET_INVALID_PARAMETER;
+        StreamTextLog buffer(3072);
+        buffer.format("Ultimate Community Edition\n");
+        buffer.format("UCE " APPL_VERSION_ASCII "\n\n");
+        buffer.format("Community firmware for the original\n");
+        buffer.format("Ultimate 64 and Ultimate 64 Elite.\n");
+        buffer.format("Independent community project.\n");
+        buffer.format("Not an official Gideon release.\n\n");
+        buffer.format("Acknowledgements\n================\n");
+        buffer.format("Gideon Zweijtzer and contributors:\n");
+        buffer.format("Ultimate hardware, FPGA platform,\n");
+        buffer.format("and original 1541ultimate firmware.\n\n");
+        buffer.format("SpiffyCrew / Nifty:\n");
+        buffer.format("Spiffy Ultimate enhancements that\n");
+        buffer.format("formed the basis of this adaptation.\n\n");
+        buffer.format("Tim Waite and community testers:\n");
+        buffer.format("UCE project direction and board tests.\n\n");
+        buffer.format("Also see AUTHORS.txt, CREDITS.md and\n");
+        buffer.format("component copyright/license notices.\n\n");
+        buffer.format("Source repositories\n===================\n");
+        buffer.format("github.com/GideonZ/1541ultimate\n");
+        buffer.format("github.com/spiffycrew/Spiffy_Ultimate\n\n");
+        buffer.format("License and warranty\n====================\n");
+        buffer.format("Firmware: GNU GPL version 3.\n");
+        buffer.format("Redistribution/modification permitted\n");
+        buffer.format("under its terms. No warranty.\n");
+        buffer.format("See LICENSE.txt in the source.\n");
+        buffer.format("Bundled components retain their\n");
+        buffer.format("respective licenses and notices.\n");
+        cmd->user_interface->run_editor(buffer.getText(), buffer.getLength());
+        return SSRET_OK;
+    }
+public:
+    void create_task_items(void) {
+        TasksCollection::getCategory("About UCE", 90)->append(
+            new Action("Acknowledgements", show, 0, 0));
+    }
+};
+static UceAboutMenu uceAboutMenu;
+#endif

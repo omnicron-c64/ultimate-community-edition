@@ -26,84 +26,70 @@ UIPopup :: UIPopup(UserInterface *ui, const char *msg, uint8_t btns, int count, 
     keyboard = 0;
 }
 
+// Consume one bounded display line; explicit newlines and blank lines survive.
+static const char *popup_next_line(const char *&cursor, int width, int &length)
+{
+    const char *start = cursor;
+    length = 0;
+    while (length < width && cursor[length] && cursor[length] != '\n' && cursor[length] != '\r') ++length;
+    cursor += length;
+    if (*cursor == '\r') { ++cursor; if (*cursor == '\n') ++cursor; }
+    else if (*cursor == '\n') ++cursor;
+    return start;
+}
+
 void UIPopup :: init()
 {
-    // first, determine how wide our popup needs to be
-    int button_width = 0;
-    int message_width = 0;
-    int message_lines = 1;
     keyboard = get_ui()->get_keyboard();
     Screen *screen = get_ui()->get_screen();
-    const char *msg = message.c_str();
-
-    int current_line_width = 0;
-    while (*msg) {
-        if (*msg == '\n') {
-            if (current_line_width > message_width) {
-                message_width = current_line_width;
-            }
-            current_line_width = 0;
-            message_lines++;
-        } else if (*msg != '\r') {
-            current_line_width++;
-        }
-        msg++;
-    }
-    if (current_line_width > message_width) {
-        message_width = current_line_width;
-    }
-
+    const int max_width = screen->get_size_x() - 2;
+    const int max_lines = screen->get_size_y() - 4;
+    int button_width = 0;
     uint8_t b = buttons;
-    for(int i=0;i<button_count;i++) {
-        if(b & 1) {
-            btns_active ++;
-            button_width += strlen(button_names[i]);
-        }
+    btns_active = 0;
+    for (int i = 0; i < button_count; ++i) {
+        if (b & 1) { ++btns_active; button_width += strlen(button_names[i]); }
         b >>= 1;
     }
-
-    int window_width = message_width;
-    if (button_width > message_width)
-        window_width = button_width;
-
+    int message_width = 0, message_lines = 0, len;
+    const char *msg = message.c_str();
+    do {
+        popup_next_line(msg, max_width, len);
+        if (len > message_width) message_width = len;
+        ++message_lines;
+    } while (*msg);
+    int window_width = message_width > button_width ? message_width : button_width;
+    if (window_width > max_width) window_width = max_width;
+    if (window_width < 1) window_width = 1;
+    // Recount using the actual content width, including any wrapped lines.
+    msg = message.c_str(); message_lines = 0;
+    do { popup_next_line(msg, window_width, len); ++message_lines; } while (*msg);
+    bool truncated = message_lines > max_lines;
+    if (truncated) message_lines = max_lines;
     int window_height = message_lines + 4;
-
-    int x1 = (screen->get_size_x() - window_width) / 2;
+    int x1 = (screen->get_size_x() - window_width - 2) / 2;
     int y1 = (screen->get_size_y() - window_height) / 2;
-    int x_b = (window_width - button_width) / 2;
-    button_start_x = x_b;
+    button_start_x = (window_width - button_width) / 2;
     button_y = message_lines + 1;
-
     screen->backup();
-    window = new Window(screen, x1, y1, window_width+2, window_height);
-    window->clear();
-    window->draw_border();
-    // window->no_scroll();
+    window = new Window(screen, x1, y1, window_width + 2, window_height);
+    window->no_scroll(); window->clear(); window->draw_border();
     window->set_color(get_ui()->color_fg);
     msg = message.c_str();
-    int row = 0;
-    while (1) {
-        const char *line_end = msg;
-        while (*line_end && *line_end != '\n' && *line_end != '\r') {
-            line_end++;
+    for (int row = 0; row < message_lines; ++row) {
+        const char *line = popup_next_line(msg, window_width, len);
+        if (truncated && row == message_lines - 1) {
+            line = "[message truncated]"; len = strlen(line);
+            if (len > window_width) len = window_width;
         }
-        int line_len = line_end - msg;
-        int x_m = (window_width - line_len) / 2;
-        window->move_cursor(x_m, row);
-        for (int i = 0; i < line_len; i++) {
-            window->output(msg[i]);
+        window->move_cursor((window_width - len) / 2, row);
+        for (int i = 0; i < len; ++i) {
+            unsigned char c = line[i];
+            // Server-supplied control bytes must not become screen commands.
+            window->output(c < 32 || c == 127 ? ' ' : c);
         }
-        if (!*line_end) {
-            break;
-        }
-        while (*line_end == '\n' || *line_end == '\r') {
-            line_end++;
-        }
-        msg = line_end;
-        row++;
     }
-
-    active_button = 0; // we can change this
+    active_button = 0;
     keyboard->wait_free();
     draw_buttons();
 }
@@ -517,6 +503,7 @@ void UIChoiceBox :: redraw(void)
     window->move_cursor(0, 0);
     window->set_color(get_ui()->color_fg);
     window->set_background(get_ui()->color_bg);
+    window->reverse_mode(0);
     window->output_line(message.c_str());
     window->move_cursor(0, 1);
     window->output_line("");
@@ -533,6 +520,7 @@ void UIChoiceBox :: redraw(void)
         }
         window->output_line(choices[i]);
     }
+    window->reverse_mode(0);
 }
 
 void UIChoiceBox :: deinit(void)
@@ -569,9 +557,11 @@ int  UIChoiceBox :: poll(int)
                 redraw();
             }
             break;
+        case KEY_RIGHT:
         case KEY_SPACE:
         case KEY_RETURN:
             return current + 1;
+        case KEY_LEFT:
         case KEY_BREAK: // break
         case KEY_ESCAPE: // exit!
         case '`': // left arrow

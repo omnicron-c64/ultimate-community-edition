@@ -1,5 +1,6 @@
 #include "userinterface.h"
 #include <stdio.h>
+#include <malloc.h>
 
 #if !defined(RUNS_ON_PC) && !defined(RECOVERYAPP)
 #include "c64.h"
@@ -13,6 +14,7 @@
 #include "path.h"
 #include "keyboard_usb.h"
 #include "filemanager.h"
+#include "json.h"
 #ifndef UPDATER
 #ifndef RECOVERYAPP
 #include "c1541.h"
@@ -80,6 +82,9 @@ static const char *helptext =
         "F2:         Enter Advanced Settings\n"
     #ifndef RECOVERYAPP
         "F4:         Show System Information\n"
+#if U64 == 1
+        "F5 / About UCE: Acknowledgements\n"
+#endif
         "F6:         Search Assembly64\n"
     #endif
         "\n"
@@ -88,6 +93,11 @@ static const char *helptext =
         "C= N:       Deselect all\n"
         "C= C:       Copy current selection\n"
         "C= V:       Paste selection here\n"
+        "C= J:       Swap joystick ports\n"
+        "\n"
+        "C= X:       C64 Reset\n"
+        "C= Z:       C64 Reboot\n"
+        "C= O:       Machine-code monitor\n"
         "\n"
         "HOME:       Enter home directory\n"
         "C= HOME:    Set current dir as home\n"
@@ -111,7 +121,7 @@ static const char *helptext =
 		"\nRUN/STOP to close this window.";
 
 /* Configuration */
-static const char *colors[] = { "Standard Blue", "Ultimate Black", "C128 Style"  };
+static char *colors[] = { "Standard Blue", "Ultimate Black", "C128 Style", "Retro 1", "Retro 2", "Retro 3" };
                           
 static const char *filename_overflow_squeeze[] = { "None", "Beginning", "Middle", "End" };
 static const char *itype[]      = { "Freeze", "Overlay on HDMI" };
@@ -123,7 +133,7 @@ struct t_cfg_definition user_if_config[] = {
     { CFG_USERIF_ITYPE,      CFG_TYPE_ENUM,   "Interface Type",       "%s", itype,   0,  1, 0 },
 #endif
     { CFG_USERIF_NAVIGATION, CFG_TYPE_ENUM,   "Navigation Style",     "%s", navstyles, 0,  1, 0 },
-    { CFG_USERIF_COLORSCHEME,CFG_TYPE_ENUM,   "Color Scheme",         "%s", colors,  0,  2, 1 },
+    { CFG_USERIF_COLORSCHEME,CFG_TYPE_ENUM,   "Color Scheme",         "%s", (const char**)colors,  0,  5, 1 },
 //    { CFG_USERIF_WORDWRAP,   CFG_TYPE_ENUM,   "Wordwrap text viewer", "%s", en_dis,  0,  1, 1 },
 
     { CFG_USERIF_START_HOME, CFG_TYPE_ENUM,   "Enter Home on Startup", "%s", en_dis, 0,  1, 0 },
@@ -153,6 +163,15 @@ UserInterface :: UserInterface(const char *title, bool use_logo) : title(title)
     filename_overflow_squeeze = 0;
     menu_response_to_action = MENU_NOP;
     logo = use_logo;
+    heap_info = false;
+    custom_logo = false;
+
+    logo_title[0] = strdup("\e2    SIXTY FOUR ");
+    logo_title[1] = strdup("  \eR\e1\x1a  ULTIMATE  \x1a\er ");
+    logo_color[0] = 6;
+    logo_color[1] = 2;
+    customize();
+
     register_store(CFG_USERIF_STORE_ID, "User Interface Settings", user_if_config);
     cfg->set_sort_order(SORT_ORDER_CFG_USERIF);
     effectuate_registered_settings();
@@ -161,6 +180,8 @@ UserInterface :: UserInterface(const char *title, bool use_logo) : title(title)
 UserInterface :: ~UserInterface()
 {
 	printf("Destructing user interface..\n");
+    free(logo_title[0]);
+    free(logo_title[1]);
     set_available(false);
     get_user_interfaces()->remove(this);
     do {
@@ -200,16 +221,19 @@ typedef struct {
     int config;
 } t_scheme_colors;
 
-const t_scheme_colors schemes[] = {
+t_scheme_colors schemes[] = {
     { 14, 6, 14, 1, 6,  0, 12, 12, 7 },
     { 0,  0, 12, 1, 6,  0,  6,  6, 7 },
     { 13,11, 15,13, 0,  0, 15, 12, 7 },
+    { 6, 14,  1, 0, 14, 0, 6, 6, 7 },
+    { 6, 14, 15, 1, 14, 0, 6, 6, 7 },
+    { 6, 14,  0, 1, 14, 0, 6, 6, 7 },
     { 0,  0, 15,13, 0,  0, 15, 12, 7 }, // telnet
 };
 
 void UserInterface :: effectuate_settings(void)
 {
-    const t_scheme_colors *scheme = logo ? &schemes[cfg->get_value(CFG_USERIF_COLORSCHEME)] : &schemes[3]; // for telnet always use something useful
+    const t_scheme_colors *scheme = logo ? &schemes[cfg->get_value(CFG_USERIF_COLORSCHEME)] : &schemes[6]; // for telnet always use something useful
     color_border = scheme->border;
     color_fg     = scheme->foreground;
     color_bg     = scheme->background;
@@ -627,6 +651,17 @@ void UserInterface :: set_screen_title()
     int width = screen->get_size_x();
     int height = screen->get_size_y();
 
+    if (logo && custom_logo && width >= 40) {
+        screen->clear();
+        for (int i = 0; i < 2; ++i) {
+            screen->move_cursor(0, i);
+            screen->set_color(logo_color[i]);
+            screen->output(logo_title[i]);
+        }
+        screen->scroll_mode(false);
+        return;
+    }
+
     int len = title.length();
     int hpos = (width - len) / 2;
 
@@ -757,6 +792,7 @@ int UserInterface :: choice(const char *msg, const char **choices, int count)
             break;
         }
     }
+    box->deinit();
     delete box;
     // Return values are 1 based, unless it's an error
     if (!ret && !host->exists()) {
@@ -878,4 +914,157 @@ const char *UserInterface :: function_key_for(int action) const
 void UserInterface :: help()
 {
     run_editor(helptext, strlen(helptext));
+}
+
+#define JSON_GET(j, name) \
+    ((j && (j->type() == eObject)) ? ((JSON_Object*) j)->get(name) : NULL)
+
+#define JSON_GET_STRING(obj, name, s) \
+    j = JSON_GET(obj, name); \
+    if (j && (j->type() == eString)) \
+        s = strdup(((JSON_String*) j)->get_string());
+
+#define JSON_GET_INTEGER(obj, name, v, mask) \
+    j = JSON_GET(obj, name); \
+    if (j && (j->type() == eInteger)) \
+        v = ((JSON_Integer*) j)->get_value() & mask;
+
+char* unescape_unicode(char *str) {
+    char *src = str, *dst = str;
+
+    while (*src) {
+        if (*src == '\\' && *(src + 1) == 'u') {
+            char *p = src + 2;
+            unsigned int val = 0, digits = 0;
+
+            // Read exactly 4 hex digits
+            while (digits < 4) {
+                char c = *p++;
+                if (c >= '0' && c <= '9') val = (val << 4) + (c - '0');
+                else if (c >= 'a' && c <= 'f') val = (val << 4) + (c - 'a' + 10);
+                else if (c >= 'A' && c <= 'F') val = (val << 4) + (c - 'A' + 10);
+                else break;
+                digits++;
+            }
+
+            if ((digits == 4)&&(val <= 0xFF)) {
+                *dst++ = (char)(val & 0xFF);
+                src = p;
+                continue;
+            }
+        }
+
+        // Normal character
+        *dst++ = *src++;
+    }
+
+    *dst = '\0';
+    return str;
+}
+
+void UserInterface :: customize()
+{
+#ifndef RECOVERYAPP
+    const char* branding_directory = "/Flash/config";
+
+    ConfigManager *cm = ConfigManager :: getConfigManager();
+    if (cm->get_safe_mode())
+        return;
+
+    printf("Checking device branding config...\n");
+    FileManager *fm = FileManager::getFileManager();
+    size_t bufferSize = 4096;
+    char* jsonText = (char*) malloc(bufferSize);
+    if (!jsonText)
+        return;
+
+    uint32_t jsonTextSize=0;
+    JSON *obj = NULL;
+    FRESULT fres = fm->load_file(branding_directory, "branding.json", (uint8_t*) jsonText, bufferSize, &jsonTextSize);
+
+    if ((fres != 0)||(jsonTextSize == 0)) {
+        free(jsonText);
+        return;
+    }
+
+    convert_text_to_json_objects(jsonText, (size_t) jsonTextSize, 1024, &obj);
+    if (!obj) {
+        free(jsonText);
+        return ;
+    }
+
+    JSON* j = JSON_GET(obj, "logo");
+    JSON* t = JSON_GET(j, "title");
+    JSON_List* l = (t && (t->type() == eList)) ? (JSON_List*) t : NULL;
+    for (int i=0;(l && (i < 2) && (i < l->get_num_elements()));i++) {
+        JSON* e = (*l)[i];
+        if (e && (e->type() == eString)) {
+            custom_logo = true;
+            free(logo_title[i]);
+            logo_title[i] = strdup(((JSON_String*) e)->get_string());
+            unescape_unicode(logo_title[i]);
+        }
+    }
+
+    t = JSON_GET(j, "color");
+    l = (t && (t->type() == eList)) ? (JSON_List*) t : NULL;
+    for (int i=0;(l && (i < 2) && (i < l->get_num_elements()));i++) {
+        JSON* e = (*l)[i];
+        if (e && (e->type() == eInteger))
+            logo_color[i] = ((JSON_Integer*) e)->get_value() & 15;
+    }
+
+    static bool colors_customized = false;
+    if (colors_customized) { delete obj; free(jsonText); return; }
+    colors_customized = true;
+    JSON* colorJson = JSON_GET(obj, "color-schemes");
+    l = (colorJson && (colorJson->type() == eList)) ? (JSON_List*) colorJson : NULL;
+    if (l) {
+        for (int i=0;i<6 && i<l->get_num_elements();i++) {
+            JSON* e = (*l)[i];
+            if (e && (e->type()==eObject)) {
+                JSON_GET_STRING( e, "name",         colors[i]);
+                JSON_GET_INTEGER(e, "border",       schemes[i].border,       0xf);
+                JSON_GET_INTEGER(e, "background",   schemes[i].background,   0xf);
+                JSON_GET_INTEGER(e, "foreground",   schemes[i].foreground,   0xf);
+                JSON_GET_INTEGER(e, "selected",     schemes[i].selected,     0xf);
+                JSON_GET_INTEGER(e, "selected_bg",  schemes[i].selected_bg,  0xf);
+                JSON_GET_INTEGER(e, "selected_rev", schemes[i].selected_rev, 0xf);
+
+                // fg/bg must not be identical, otherwise use defaults
+                if (schemes[i].background == schemes[i].foreground) {
+                    schemes[i].background = 14;
+                    schemes[i].foreground = 1;
+                }
+                if (schemes[i].selected == schemes[i].selected_bg) {
+                    schemes[i].selected_bg = 1;
+                    schemes[i].selected = 14;
+                }
+                // selected must not match inverse of normal colors
+                if ((schemes[i].selected == schemes[i].background)&&
+                    (schemes[i].selected_bg == schemes[i].foreground)) {
+                    schemes[i].selected    = schemes[i].foreground;
+                    schemes[i].selected_bg = schemes[i].background;
+                }
+            }
+        }
+    }
+
+    delete obj;
+    free(jsonText);
+#endif
+}
+
+void UserInterface :: show_heap_info()
+{
+    if (!heap_info)
+        return;
+    // Show heap information, just overwrite the status line.
+    // Simple solution to help with leak hunting...
+    screen->move_cursor(0, screen->get_size_y()-1);
+    struct mallinfo mi = mallinfo();
+    char buffer[80];
+    sprintf(buffer, "\er\033\035heap: alloc=%-7u, avail=%-7u\e1 ",
+            (uint32_t) mi.uordblks, (uint32_t) mi.fordblks);
+    screen->output(buffer);
 }

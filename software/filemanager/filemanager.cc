@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include "path.h"
 #include "filemanager.h"
+#include "file_copy_stream.h"
 #include "embedded_fs.h"
 #include "file_device.h"
 #include "pattern.h"
@@ -876,7 +877,7 @@ FRESULT FileManager::fstat(const char *pathname, FileInfo &info)
     return FR_OK;
 }
 
-void FileManager::fclose(File *f)
+FRESULT FileManager::fclose(File *f)
 {
     bool delete_on_last_close = false;
     bool enforce_after_close = false;
@@ -919,7 +920,7 @@ void FileManager::fclose(File *f)
         }
     }
     open_file_list.remove(f);
-    f->close();
+    FRESULT close_result = f->close();
     if (publish_dir) {
         sendEventToObservers(eRefreshDirectory, changed_dir.c_str(), "");
     }
@@ -930,6 +931,7 @@ void FileManager::fclose(File *f)
     } else if (enforce_after_close) {
         enforce_temp_limits();
     }
+    return close_result;
 }
 
 void FileManager::add_root_entry(CachedTreeNode *obj)
@@ -1136,6 +1138,7 @@ FRESULT FileManager::delete_recursive(Path *path, const char *name)
                 for (int i = 0; i < dirlist->get_elements(); i++) {
                     FileInfo *el = (*dirlist)[i];
                     ret = delete_recursive(path, el->lfname);
+                    delete el;
                 }
             } else {
                 ret = get_dir_result;
@@ -1309,6 +1312,7 @@ FRESULT FileManager::fcopy(const char *path, const char *filename, const char *d
                     for (int i = 0; i < dirlist->get_elements(); i++) {
                         FileInfo *el = (*dirlist)[i];
                         ret = fcopy(sp->get_path(), el->lfname, dp->get_path(), el->lfname, overwrite);
+                        delete el;
                         if (ret != FR_OK) {
                             break;
                         }
@@ -1329,42 +1333,24 @@ FRESULT FileManager::fcopy(const char *path, const char *filename, const char *d
             if (fi) {
                 File *fo = 0;
                 char dest_name[100];
-                strncpy(dest_name, dest_filename, 100);
+                const char* output_filename = dest_filename;
+                // get destination file extension
+                char file_ext[4];
+                get_extension(dest_filename, file_ext, true);
                 // This may look odd, but files inside a D64 for instance, do not have the extension in the filename anymore
-                // so we add it here.
-                set_extension(dest_name, info->extension, 100);
+                // so we add it here, but only when necessary.
+                if (strcmp(file_ext, info->extension) != 0) {
+                    strncpy(dest_name, dest_filename, 100);
+                    set_extension(dest_name, info->extension, 100);
+                    output_filename = dest_name;
+                }
                 uint8_t writeflags = (overwrite)? (FA_WRITE|FA_CREATE_ALWAYS) : (FA_WRITE|FA_CREATE_NEW);
-                ret = fopen(dp, dest_name, writeflags, &fo);
+                ret = fopen(dp, output_filename, writeflags, &fo);
                 if (fo) {
-                    uint8_t *buffer = new uint8_t[32768];
-                    uint32_t transferred, written;
-                    do {
-                        FRESULT frd_result = fi->read(buffer, 32768, &transferred);
-#if OS
-                        vTaskDelay(2); // since this might take long, we should give other tasks chance to poll the USB devices
-#endif
-                        if (frd_result == FR_OK) {
-                            FRESULT fwr_result = fo->write(buffer, transferred, &written);
-#if OS
-                            vTaskDelay(2); // since this might take long, we should give other tasks chance to poll the USB devices
-#endif
-                            if (fwr_result != FR_OK) {
-                                ret = fwr_result;
-                                break;
-                            }
-                        }
-                        else {
-                            ret = frd_result;
-                            break;
-                        }
-                    } while (transferred > 0);
-
-                    delete[] buffer;
-                    fclose(fo);
-                    fclose(fi);
+                    ret = copy_stream_and_close(this, fi, fo);
                 }
                 else { // no output file
-                    printf("Cannot open output file %s\n", filename);
+                    printf("Cannot open output file %s\n", output_filename);
                     fclose(fi);
                 }
             }

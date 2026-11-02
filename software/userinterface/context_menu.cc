@@ -3,6 +3,8 @@
 #include <string.h>
 #include "tree_browser.h"
 #include "tree_browser_state.h"
+#include "subsys.h"
+#include "c64.h"
 
 ContextMenu :: ContextMenu(UserInterface *ui, TreeBrowserState *state, int initial, int y, int when_done, int ind) : UIObject(ui), actions(2, 0)
 {
@@ -50,12 +52,13 @@ ContextMenu :: ~ContextMenu(void)
 int ContextMenu :: get_items(void)
 {
     if(contextable) {
-        contextable->fetch_context_items(actions);
-        if (state && state->browser && state->browser->pick_mode != TreeBrowser::PICK_NONE &&
-            state->browser->can_pick(contextable)) {
-            pickAction = new Action("Select", (actionFunction_t)NULL, 0);
-            actions.prepend(pickAction);
-        }
+        if (state && state->browser && state->browser->pick_mode != TreeBrowser::PICK_NONE) {
+            // Never expose Copy To / Move / Run / Delete inside a file picker.
+            if (state->browser->can_pick(contextable)) {
+                pickAction = new Action("Select", (actionFunction_t)NULL, 0);
+                actions.prepend(pickAction);
+            }
+        } else contextable->fetch_context_items(actions);
     }
     return actions.get_elements();
 }
@@ -194,6 +197,7 @@ int ContextMenu :: poll(int sub)
 
     switch(context_state) {
         case e_active:
+            get_ui()->show_heap_info();
             c = keyb->getch();
             c = get_ui()->keymapper(c, e_keymap_default);
             if(c > 0) {
@@ -333,6 +337,23 @@ int ContextMenu :: handle_key(int c)
                 ret = select_item();
             }
             break;
+
+#ifndef RECOVERYAPP
+        case KEY_CTRL_J: // joyswap
+            return swap_joystick();
+        case KEY_CTRL_X: // reset
+        {
+            SubsysCommand* cmd = new SubsysCommand(NULL, SUBSYSID_C64, MENU_C64_RESET, (int)0, "", "");
+            cmd->execute();
+            break;
+        }
+        case KEY_CTRL_Z: // reboot
+        {
+            SubsysCommand* cmd = new SubsysCommand(NULL, SUBSYSID_C64, MENU_C64_REBOOT, (int)0, "", "");
+            cmd->execute();
+            break;
+        }
+#endif
 
         default:
             if ((c >= '!') && (c < 0x80)) {

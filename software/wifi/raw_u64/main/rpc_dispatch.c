@@ -17,6 +17,7 @@
 #include "driver/gpio.h"
 #include "pinout.h"
 #include "wifi_modem.h"
+#include "wifi_saved.h"
 #include "sntp.h"
 
 // not officially supported
@@ -82,6 +83,7 @@ void cmd_scan(command_buf_t *buf)
 
     if (xQueueSend(connect_commands, &cmd, 1000) == pdFALSE) {
         resp->esp_err = ESP_ERR_NO_MEM;
+        buf->size = sizeof(rpc_espcmd_resp);
         my_uart_transmit_packet(UART_CHAN, buf);
         return;
     }
@@ -106,7 +108,9 @@ void cmd_wifi_connect(command_buf_t *buf)
     ev.command = CMD_WIFI_CONNECT;
     ev.auth_mode = param->auth_mode;
     memcpy(&ev.ssid, param->ssid, 32);
+    ev.ssid[32] = 0;
     memcpy(&ev.pw, param->password, 64);
+    ev.pw[64] = 0;
 
     if (xQueueSend(connect_commands, &ev, 1000) == pdFALSE) {
         resp->esp_err = ESP_ERR_NO_MEM;
@@ -115,6 +119,27 @@ void cmd_wifi_connect(command_buf_t *buf)
     }
     xSemaphoreGive(connect_semaphore);
     // command is now in the queue, so the connect handler will process it further
+}
+
+// Management goes through the connector task, serialized with credential writes.
+static void cmd_wifi_saved(command_buf_t *buf, uint8_t command)
+{
+    ConnectCommand_t ev = {0};
+    ev.command = command; ev.buf = buf;
+    if (command != CMD_WIFI_SAVED_LIST) {
+        if (buf->size != 38 || buf->data[4] >= WIFI_SAVED_MAX ||
+            !memchr(buf->data + 5, 0, 33)) goto invalid;
+        ev.list_index = buf->data[4];
+        memcpy(ev.ssid, buf->data + 5, 33);
+    }
+    if (xQueueSend(connect_commands, &ev, 0) == pdTRUE) {
+        xSemaphoreGive(connect_semaphore);
+        return;
+    }
+invalid:
+    ((rpc_espcmd_resp *)buf->data)->esp_err = ESP_ERR_INVALID_ARG;
+    buf->size = sizeof(rpc_espcmd_resp);
+    my_uart_transmit_packet(UART_CHAN, buf);
 }
 
 void cmd_wifi_autoconnect(command_buf_t *buf)
@@ -284,6 +309,11 @@ void dispatch(void *ct)
             break;
         case CMD_SET_BAUD:
             cmd_setbaud(pbuffer);
+            break;
+        case CMD_WIFI_SAVED_LIST:
+        case CMD_WIFI_SAVED_CONNECT:
+        case CMD_WIFI_SAVED_FORGET:
+            cmd_wifi_saved(pbuffer, hdr->command);
             break;
         case CMD_WIFI_SCAN:
             cmd_scan(pbuffer);

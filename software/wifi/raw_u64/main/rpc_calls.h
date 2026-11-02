@@ -148,6 +148,12 @@ typedef struct {
     uint8_t ssid[32];
 } event_pkt_connected;
 
+// Optional extension to EVENT_DISCONNECTED. Older hosts ignore the payload.
+typedef struct {
+    rpc_header_t hdr;
+    uint16_t reason;
+} event_pkt_disconnected;
+
 #define CMD_ECHO              0x01
 #define CMD_IDENTIFY          0x02
 #define CMD_SET_BAUD          0x03

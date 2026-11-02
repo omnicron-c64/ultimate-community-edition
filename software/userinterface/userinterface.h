@@ -72,6 +72,7 @@ private:
     
     void set_screen_title(void);
     void set_available(bool enable);
+    void customize(void);
     int  pollFocussed(void);
     bool pollMenuButtonPush(void);
     void discardPendingMenuButton(void);
@@ -84,6 +85,10 @@ public:
 
     int config_save, filename_overflow_squeeze, navmode;
     bool logo;
+    bool heap_info;
+    bool custom_logo;
+    char* logo_title[2];
+    int logo_color[2];
     GenericHost *host;
     Keyboard *keyboard;
     Screen *screen;
@@ -128,6 +133,7 @@ public:
     int  activate_uiobject(UIObject *obj);
     int  uiobject_modal(UIObject *obj);
     bool has_focus(UIObject *obj);
+    UIObject *focused_object() { return (focus >= 0) ? ui_objects[focus] : NULL; }
     int  getPreferredType(void);
     void help();
     void run_editor(const char *, int);
@@ -144,6 +150,8 @@ public:
         ACTIVE_SCREEN_MATRIX_BYTES = ACTIVE_SCREEN_MATRIX_CELLS * ACTIVE_SCREEN_MATRIX_PLANES
     };
     static bool copy_active_screen_matrix(uint8_t *dest, int dest_len);
+    void toggle_heap_info(void) { heap_info = !heap_info; }
+    void show_heap_info(void);
 
     UIObject *get_root_object(void) { return ui_objects[0]; }
 

@@ -28,6 +28,7 @@
 #include "rpc_calls.h"
 #include "rpc_dispatch.h"
 #include "wifi_modem.h"
+#include "wifi_saved.h"
 #include "pinout.h"
 
 #define NET_CMD_BUFSIZE 512
@@ -196,6 +197,12 @@ static void wifi_event_handler(void *esp_netif, esp_event_base_t base, int32_t e
                 memcpy(ev2->ssid, last_connect.ssid, 32);
                 reply->size = sizeof(event_pkt_connected);
             }
+            if (evcode == EVENT_DISCONNECTED) {
+                event_pkt_disconnected *dis = (event_pkt_disconnected *)reply->data;
+                const wifi_event_sta_disconnected_t *event = (const wifi_event_sta_disconnected_t *)data;
+                dis->reason = event ? event->reason : 0;
+                reply->size = sizeof(*dis);
+            }
             my_uart_transmit_packet(UART_NUM_1, reply);
         } else {
             ESP_LOGW(TAG, "No buffer to send event.");
@@ -332,96 +339,7 @@ esp_err_t wifi_scan(ultimate_ap_records_t *ult_records)
     return ESP_OK;
 }
 
-static esp_err_t store_password(nvs_handle_t handle, char *key, const char *password, uint8_t auth_mode)
-{
-    key[0] = 'p'; // password pa, pb, pc, pd, ...
-    esp_err_t err = nvs_set_str(handle, key, password);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to store password: %d", err);
-        return err;
-    }
-    key[0] = 'm'; // authmode ma, mb, mc, md, ...
-    err = nvs_set_u8(handle, key, auth_mode);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to store authmode: %d", err);
-        return err;
-    }
-    err = nvs_commit(handle);
-    return err;
-}
-
-esp_err_t wifi_store_ap(ConnectCommand_t *cmd)
-{
-    const char *ssid = (const char *)cmd->ssid;
-    const char *password = cmd->pw;
-    const uint8_t auth_mode = cmd->auth_mode;
-
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open("recent_aps", NVS_READWRITE, &handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to open NVS: %d", err);
-        return err;
-    }
-    int stored = 0;
-    char key[4] = {0};
-
-    for(int i=0; i<16; i++) {
-        key[0] = 's';
-        key[1] = 'a' + i;
-        key[2] = '0'; // SSID sa, sb, sc, sd, ...
-        size_t len = 32;
-        char ssid_buf[32];
-        // see if the ssid has been stored already
-        err = nvs_get_str(handle, key, ssid_buf, &len);
-        if (err != ESP_OK) { // nope, it doesn't exist
-            ESP_LOGI(TAG, "SSID does not exist yet: %d", err);
-            err = nvs_set_str(handle, key, ssid);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to store SSID: %d", err);
-                return err;
-            }
-            err = store_password(handle, key, password, auth_mode);
-            cmd->list_index = i;
-            stored = 1;
-            break;
-        } else {
-            if (strcmp(ssid_buf, ssid) == 0) {
-                ESP_LOGI(TAG, "SSID %s already stored, overwriting...", ssid);
-                err = store_password(handle, key, password, auth_mode);
-                cmd->list_index = i;
-                stored = 1;
-                break;
-            }
-        }
-    }
-    if (!stored) {
-        ESP_LOGE(TAG, "No more space to store SSID %s", ssid);
-        key[0] = 's';
-        key[1] = 'a'; // overwrite first (oldest?) entry
-        err = nvs_set_str(handle, key, ssid);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to store SSID: %d", err);
-            return err;
-        }
-        cmd->list_index = 0;
-        err = store_password(handle, key, password, auth_mode);
-    }
-    nvs_close(handle);
-    return err;
-}
-
-esp_err_t wifi_set_last_ap(int index)
-{
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open("recent_aps", NVS_READWRITE, &handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to open NVS: %d", err);
-        return err;
-    }
-    err = nvs_set_i8(handle, "last", (int8_t)index);
-    nvs_close(handle);
-    return err;
-}
+#include "wifi_ap_credentials.h"
 
 esp_err_t attempt_connect(const char *ssid, const char *passwd, uint8_t authmode)
 {
@@ -460,7 +378,7 @@ esp_err_t attempt_connect(const char *ssid, const char *passwd, uint8_t authmode
     if (err == ESP_OK) {
         err = esp_wifi_connect();
     }
-    ESP_LOGI(TAG, "Connecting to %s, with password %s, mode %d -> Err = %d", ssid, passwd, authmode, err);
+    ESP_LOGI(TAG, "Connecting to %s, mode %d -> Err = %d", ssid, authmode, err);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to connect: %d", err);
     }
@@ -491,7 +409,7 @@ void wifi_list_aps(void)
             len = 68;
             err = nvs_get_str(handle, key, pw_entry, &len);
             if (err == ESP_OK) {
-                ESP_LOGI(TAG, "Stored AP %d: '%s' '%s'", i, ssid_entry, pw_entry);
+                ESP_LOGI(TAG, "Stored AP %d: '%s'", i, ssid_entry);
             } else {
                 ESP_LOGI(TAG, "Stored AP %d: Failed to get password: %d", i, err);
             }
@@ -545,10 +463,10 @@ esp_err_t wifi_connect_to_scanned(int index)
     // now look up password
     err = ESP_OK;
     if (ap_info[index].authmode) {
-        err = wifi_find_password(ap_info[index].ssid, last_connect.pw, 64, &last_connect.list_index);
+        err = wifi_find_password(ap_info[index].ssid, last_connect.pw, sizeof(last_connect.pw), &last_connect.list_index);
     } else {
         // no authentication required. But make sure the user has configured this AP.
-        err = wifi_find_password(ap_info[index].ssid, last_connect.pw, 64, &last_connect.list_index);
+        err = wifi_find_password(ap_info[index].ssid, last_connect.pw, sizeof(last_connect.pw), &last_connect.list_index);
         if ((err == ESP_OK)&&(last_connect.pw[0] != 0)) {
             // AP is known and configured, however, with a password. Do not allow to connect.
             err = ESP_ERR_NOT_FOUND;
@@ -556,6 +474,7 @@ esp_err_t wifi_connect_to_scanned(int index)
     }
     if (err == ESP_OK) { // known AP found
         strncpy(last_connect.ssid, (const char *)(ap_info[index].ssid), 32);
+        last_connect.ssid[32] = 0;
         last_connect.auth_mode = ap_info[index].authmode;
         return attempt_connect(last_connect.ssid, last_connect.pw, last_connect.auth_mode);
     }
@@ -582,11 +501,11 @@ esp_err_t wifi_connect_to_stored(int index)
     key[1] = 'a' + index;
     key[2] = '0'; // SSID sa, sb, sc, sd, ...
 
-    size_t len = 32;    
+    size_t len = sizeof(last_connect.ssid);
     err = nvs_get_str(handle, key, last_connect.ssid, &len);
     if (err == ESP_OK) {
         key[0] = 'p'; // password pa, pb, pc, pd, ...
-        len = 64;
+        len = sizeof(last_connect.pw);
         err = nvs_get_str(handle, key, last_connect.pw, &len);
         if (err == ESP_OK) {
             key[0] = 'm'; // authmode ma, mb, mc, md, ...
@@ -624,6 +543,8 @@ esp_err_t wifi_connect_to_last()
     return err;
 }
 
+#include "wifi_saved_store.h"
+
 int handle_connect_command(ConnectCommand_t *cmd, ConnectState_t *state)
 {
     ConnectEvent_t connect_event;
@@ -631,6 +552,32 @@ int handle_connect_command(ConnectCommand_t *cmd, ConnectState_t *state)
     esp_err_t err;
 
     switch(cmd->command) {
+        case CMD_WIFI_SAVED_LIST:
+        case CMD_WIFI_SAVED_FORGET:
+        case CMD_WIFI_SAVED_CONNECT:
+            {
+                err = saved_ap_command(cmd);
+                if (cmd->command != CMD_WIFI_SAVED_LIST) buf->size = sizeof(rpc_espcmd_resp);
+                // NVS may be empty or unavailable; list still has a well-formed error.
+                if (cmd->command == CMD_WIFI_SAVED_LIST && err != ESP_OK) {
+                    buf->size = 9; buf->data[8] = 0;
+                }
+                if (err == ESP_OK && cmd->command == CMD_WIFI_SAVED_CONNECT) {
+                    user_disconnected = false;
+                    err = wifi_connect_to_stored(cmd->list_index);
+                }
+                ((rpc_espcmd_resp *)buf->data)->esp_err = err;
+                my_uart_transmit_packet(UART_NUM_1, buf);
+                if (err == ESP_OK && cmd->command == CMD_WIFI_SAVED_CONNECT) {
+                    xQueueReceive(connect_events, &connect_event, portMAX_DELAY);
+                    if (connect_event.event_code == EVENT_CONNECTED) {
+                        wifi_set_last_ap(cmd->list_index);
+                        *state = Connected;
+                        return 1;
+                    }
+                }
+            }
+            break;
         case CMD_WIFI_SCAN:
             {
                 rpc_scan_resp *resp = (rpc_scan_resp *)buf->data;

@@ -92,6 +92,7 @@ public:
     mstring  picked_path;
     mstring  picked_name;
     const char *title;
+    const char *pick_label;
 
     FileManager *fm;
     UserInterface *user_interface;
@@ -149,5 +150,5 @@ public:
     const char *getPath();
 };
 
-int pick_path(UserInterface *intf, mstring& path);
+int pick_path(UserInterface *intf, mstring& path, const char *title = "Select folder", const char *label = "<< Use this folder >>");
 #endif

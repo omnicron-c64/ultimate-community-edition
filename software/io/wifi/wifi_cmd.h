@@ -14,6 +14,7 @@
 #include "task.h"
 #include "semphr.h"
 #include "rpc_calls.h"
+#include "wifi_reply.h"
 extern "C" {
     #include "cmd_buffer.h"
 }
@@ -48,6 +49,11 @@ int wifi_modem_enable(bool);
 int wifi_get_voltages(voltages_t *voltages);
 int wifi_is_connected(uint8_t &status);
 int wifi_forget_aps();
+#if U64 == 1
+#include "wifi_saved.h"
+int wifi_saved_list(wifi_saved_record *records, unsigned *count);
+int wifi_saved_action(uint8_t command, const wifi_saved_record *record);
+#endif
 int wifi_set_serial(const char *serial);
 int wifi_get_serial(char *serial);
 
@@ -60,37 +66,43 @@ int wifi_get_power_mode(uint8_t *mode, uint8_t *last_state);
 int wifi_set_wake_on_wifi(uint8_t enabled);
 int wifi_get_wake_on_wifi(uint8_t *enabled);
 
-extern uint16_t sequence_nr;
-extern TaskHandle_t tasksWaitingForReply[NUM_TX_BUFFERS];
+// Registers the calling task as the waiter for the reply to this request
+int wifi_reply_register(rpc_header_t *hdr);
+// Sends the request and waits for its reply; NULL if there is none in time
+command_buf_t *wifi_transmit(command_buf_t *buf, int timeout_ms);
+command_buf_t *wifi_wait_reply(rpc_header_t hdr, int timeout_ms);
 extern "C" { void print_uart_status(); }
 extern const char *no_wifi_buf;
+extern const char *no_wifi_slot;
 
-#define BUFARGS(x, cmd)     command_buf_t *buf; \
+#define WIFI_REPLY_TIMEOUT_MS   10000
+#define WIFI_SLOW_TIMEOUT_MS    60000 // scan and connect
+
+// For requests that are not answered, such as network frames. 'failed' is what
+// the caller returns when there is no TX buffer: not 0 where that reads as success.
+#define BUFARGS_NOREPLY(x, cmd, failed) command_buf_t *buf; \
                             BaseType_t gotbuf = esp32.uart->GetBuffer(&buf, 1000); \
-                            if (gotbuf == pdFALSE) { printf(no_wifi_buf); /*print_uart_status();*/ return pdFALSE; } \
+                            if (gotbuf == pdFALSE) { printf(no_wifi_buf); /*print_uart_status();*/ return failed; } \
                             rpc_ ## x ## _req *args = (rpc_ ## x ## _req *)buf->data; \
                             args->hdr.command = cmd; \
-                            args->hdr.sequence = sequence_nr++; \
-                            args->hdr.thread = (uint8_t)buf->bufnr; \
-                            buf->size = sizeof(rpc_ ## x ## _req); \
-                            tasksWaitingForReply[buf->bufnr] = xTaskGetCurrentTaskHandle();
+                            args->hdr.sequence = 0; \
+                            args->hdr.thread = 0xFF; \
+                            buf->size = sizeof(rpc_ ## x ## _req);
 
+#define BUFARGS(x, cmd)     BUFARGS_NOREPLY(x, cmd, -1) \
+                            if (!wifi_reply_register(&args->hdr)) { esp32.uart->FreeBuffer(buf); printf(no_wifi_slot); return -1; }
 
-#define TRANSMIT(x)         esp32.uart->TransmitPacket(buf); \
-                            xTaskNotifyWait(0, 0, (uint32_t *)&buf, portMAX_DELAY); \
-                            rpc_ ## x ## _resp *result = (rpc_ ## x ## _resp *)buf->data; \
-                            if(result->hdr.thread < NUM_TX_BUFFERS) { \
-                                tasksWaitingForReply[result->hdr.thread] = NULL; \
-                            }
+#define TRANSMIT_T(x, ms)   buf = wifi_transmit(buf, ms); \
+                            if (!buf) { printf("*** NO REPLY FROM WIFI MODULE.\n"); return -1; } \
+                            rpc_ ## x ## _resp *result = (rpc_ ## x ## _resp *)buf->data;
+
+#define TRANSMIT(x)         TRANSMIT_T(x, WIFI_REPLY_TIMEOUT_MS)
 
 #define TRANSMITDBG(x)      printf("Transmitting %b:\n", buf->bufnr); dump_hex_relative(buf->data, buf->size);\
-                            esp32.uart->TransmitPacket(buf); \
-                            xTaskNotifyWait(0, 0, (uint32_t *)&buf, portMAX_DELAY); \
+                            buf = wifi_transmit(buf, WIFI_REPLY_TIMEOUT_MS); \
+                            if (!buf) { printf("*** NO REPLY FROM WIFI MODULE.\n"); return -1; } \
                             printf("Received %b:\n", buf->bufnr); dump_hex_relative(buf->data, buf->size);\
-                            rpc_ ## x ## _resp *result = (rpc_ ## x ## _resp *)buf->data; \
-                            if(result->hdr.thread < NUM_TX_BUFFERS) { \
-                                tasksWaitingForReply[result->hdr.thread] = NULL; \
-                            }
+                            rpc_ ## x ## _resp *result = (rpc_ ## x ## _resp *)buf->data;
 
 #define RETURN_STD          errno = result->xerrno; \
                             int retval = result->retval; \

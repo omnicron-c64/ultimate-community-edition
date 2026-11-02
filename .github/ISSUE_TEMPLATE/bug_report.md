@@ -1,33 +1,29 @@
 ---
 name: Bug report
-about: Create a report to help us improve
+about: Report a reproducible UCE firmware issue
 title: ''
 labels: ''
 assignees: ''
-
 ---
 
-**Describe the bug**
-A clear and concise description of what the bug is.
+**Hardware and software**
+- Board model/revision:
+- C64 core version:
+- UCE version/source commit:
+- ESP32 bridge version:
+- Ethernet or Wi-Fi:
+- PAL/NTSC and interface mode, if relevant:
 
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Go to '...'
-2. Select '....'
-3. Scroll down to '....'
-4. Run program '....'
-4. See error
+**Steps to reproduce**
+1.
+2.
+3.
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+**Expected result**
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
+**Actual result**
 
-**Applies to (please complete the following information):**
- - Hardware type: [e.g. 1541U, U2+, U2+L, U64, U64E2]
- - Firmware Version [e.g. 3.12a]
- - Git Gash [see F4]
+**Frequency and last working version**
 
-**Additional context**
-Add any other context about the problem here.
+**Logs/screenshots**
+Remove passwords, credentials and private configuration before sharing.

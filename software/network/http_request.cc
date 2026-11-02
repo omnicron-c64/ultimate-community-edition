@@ -83,6 +83,7 @@ void attachment_to_buffer(BodyDataBlock_t *block)
             // printf("--- Raw Data Start ---\n");
             body->offset = 0;
             body->size = 0;
+            body->overflow = false;
             break;
         case eSubHeader:
             // printf("--- SubHeader ---\n");
@@ -93,11 +94,13 @@ void attachment_to_buffer(BodyDataBlock_t *block)
             break;
         case eDataBlock:
             // printf("--- Data (%d bytes)\n", block->length);
-            if (block->length < (16384 - body->offset)) {
+            if (!body->overflow && block->length >= 0 && body->offset >= 0 &&
+                block->length < ((int)sizeof(body->buffer) - body->offset)) {
                 memcpy(body->buffer + body->offset, block->data, block->length);
                 body->offset += block->length;
                 body->size += block->length;
             } else {
+                body->overflow = true;
                 printf("-> Ditched, buffer full.\n");
             }
             break;
@@ -117,6 +120,7 @@ void collect_in_buffer(HTTPReqMessage *req, HTTPRespMessage *resp)
     req->userContext = body;
     body->offset = 0;
     body->size = 0;
+    body->overflow = false;
     setup_multipart(req, &attachment_to_buffer, body);
 }
 
@@ -147,9 +151,10 @@ void get_response(int socket_fd, HTTPREQ_CALLBACK callback, HTTPReqMessage& resp
 
 JSON *convert_buffer_to_json(t_BufferedBody *body)
 {
+    if (!body || body->overflow || body->size < 0 || body->size >= (int)sizeof(body->buffer)) return NULL;
     body->buffer[body->size] = 0;
     JSON *json = NULL;
-    int j = convert_text_to_json_objects((char *)body->buffer, body->size, 1000, &json);
+    int j = convert_text_to_json_objects((char *)body->buffer, body->size, 6000, &json);
     if (j < 0) {
         if (json) {
             delete json;
